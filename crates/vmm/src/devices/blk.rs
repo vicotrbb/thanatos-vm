@@ -56,6 +56,7 @@ impl Blk {
         reader: &mut impl Read,
         data: &mut impl Write,
         len: usize,
+        incoming: usize,
     ) -> u8 {
         let in_range = |bytes: usize| {
             sector
@@ -65,7 +66,7 @@ impl Blk {
         let Some(start) = sector.checked_mul(SECTOR) else {
             return IOERR;
         };
-        let mut buffer = vec![0; CHUNK.min(len.max(1))];
+        let mut buffer = vec![0; CHUNK.min(len.max(incoming).max(1))];
         match kind {
             IN if in_range(len) => {
                 let mut done = 0;
@@ -155,7 +156,15 @@ impl Device for Blk {
                 used.push((head, 0));
                 continue;
             };
-            let code = self.serve(kind, sector, &mut reader, &mut writer, writable - 1);
+            let incoming = reader.available_bytes();
+            let code = self.serve(
+                kind,
+                sector,
+                &mut reader,
+                &mut writer,
+                writable - 1,
+                incoming,
+            );
             let _ = status.write_obj(code);
             used.push((
                 head,

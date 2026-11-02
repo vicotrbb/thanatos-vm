@@ -202,6 +202,30 @@ impl Vcpu for KvmVcpu<'_> {
     }
 }
 
+/// Opens a Linux tap device by name, ready to read and write frames.
+pub fn open_tap(name: &str) -> io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    const IFF_TAP: libc::c_short = 2;
+    const IFF_NO_PI: libc::c_short = 0x1000;
+    const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
+    if name.is_empty() || name.len() >= libc::IFNAMSIZ {
+        return Err(io::Error::other(format!("bad tap name {name:?}")));
+    }
+    let file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")?;
+    let mut request = [0u8; 40]; // struct ifreq: the name, then the flags
+    request[..name.len()].copy_from_slice(name.as_bytes());
+    request[16..18].copy_from_slice(&(IFF_TAP | IFF_NO_PI).to_ne_bytes());
+    // SAFETY: the buffer is the size of struct ifreq and outlives the call.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, request.as_mut_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
 #[cfg(target_arch = "x86_64")]
 mod arch {
     use super::*;

@@ -8,6 +8,7 @@ use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryRegion};
 pub const RAM_BASE: u64 = 0x8000_0000;
 pub const SERIAL_BASE: u64 = 0x0900_0000;
 pub const SERIAL_SPI: u32 = 1;
+pub const RTC_BASE: u64 = 0x0901_0000;
 const GIC_PHANDLE: u32 = 1;
 const CLOCK_PHANDLE: u32 = 2;
 const REDISTRIBUTOR_SIZE: u64 = 0x2_0000;
@@ -126,6 +127,16 @@ fn device_tree(
     fdt.property_array_u32("clocks", &[CLOCK_PHANDLE, CLOCK_PHANDLE])?;
     fdt.property_string_list("clock-names", vec!["uartclk".into(), "apb_pclk".into()])?;
     fdt.end_node(uart)?;
+
+    let rtc = fdt.begin_node(&format!("pl031@{RTC_BASE:x}"))?;
+    fdt.property_string_list(
+        "compatible",
+        vec!["arm,pl031".into(), "arm,primecell".into()],
+    )?;
+    fdt.property_array_u64("reg", &[RTC_BASE, 0x1000])?;
+    fdt.property_array_u32("clocks", &[CLOCK_PHANDLE])?;
+    fdt.property_string("clock-names", "apb_pclk")?;
+    fdt.end_node(rtc)?;
 
     for &(base, length, spi) in devices {
         let node = fdt.begin_node(&format!("virtio_mmio@{base:x}"))?;

@@ -7,6 +7,7 @@ pub mod devices;
 pub mod machine;
 pub mod mmio;
 pub mod pl011;
+pub mod rtc;
 pub mod serial;
 pub mod server;
 pub use thanatos_hv::GuestMemory;

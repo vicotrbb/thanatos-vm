@@ -12,6 +12,8 @@ mod kvm;
 pub use hvf::Host;
 #[cfg(target_os = "linux")]
 pub use kvm::Host;
+#[cfg(target_os = "linux")]
+pub use kvm::open_tap;
 
 /// Guest RAM. Devices touch it only through `vm-memory`'s checked accessors.
 pub type GuestMemory = vm_memory::GuestMemoryMmap<()>;

@@ -7,7 +7,12 @@ use crate::{
     GuestMemory, boot,
     config::{Config, expand},
     console::Console,
-    devices::{blk::Blk, rng::Rng, vsock::Vsock},
+    devices::{
+        blk::Blk,
+        net::{self, Net},
+        rng::Rng,
+        vsock::Vsock,
+    },
     mmio::{Irq, Mmio, Slot},
 };
 use std::{
@@ -40,6 +45,8 @@ mod layout {
 #[derive(Clone)]
 pub struct Control {
     pub vsock: Arc<Slot<Vsock>>,
+    /// `None` on a tap, where the operator's network applies instead.
+    pub network: Option<thanatos_net::Net>,
     pub console: Console,
     pub stop: Arc<dyn Fn() + Send + Sync>,
 }
@@ -89,6 +96,82 @@ fn open_disk(disk: &crate::config::Disk) -> io::Result<File> {
         .map_err(named)
 }
 
+/// shortcut: the tap backend exists only on Linux, as DESIGN 4.8 specifies.
+#[cfg(target_os = "linux")]
+fn tap_device(
+    config: &Config,
+    mac: [u8; 6],
+    memory: &GuestMemory,
+    irq: &Irq,
+    line: u32,
+) -> io::Result<Arc<Slot<Net>>> {
+    let tap = thanatos_hv::open_tap(&config.network.tap)?;
+    let writer = tap.try_clone()?;
+    let slot = Slot::new(
+        Net::new(mac, net::write_tap(writer)),
+        memory.clone(),
+        irq.clone(),
+        line,
+    );
+    net::pump_tap(tap, slot.clone());
+    Ok(slot)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tap_device(
+    _: &Config,
+    _: [u8; 6],
+    _: &GuestMemory,
+    _: &Irq,
+    _: u32,
+) -> io::Result<Arc<Slot<Net>>> {
+    Err(io::Error::other(
+        "the tap network backend exists only on Linux",
+    ))
+}
+
+fn network(
+    config: &Config,
+    memory: &GuestMemory,
+    irq: &Irq,
+    line: u32,
+) -> io::Result<(Arc<Slot<Net>>, Option<thanatos_net::Net>)> {
+    let mac = net::mac_from_name(&config.name);
+    if config.network.backend == "tap" {
+        return Ok((tap_device(config, mac, memory, irq, line)?, None));
+    }
+    if config.network.backend != "user" {
+        return Err(io::Error::other(format!(
+            "unknown network backend {:?}",
+            config.network.backend
+        )));
+    }
+    // The stack needs the device to deliver to and the device the stack to send to.
+    let stack = Arc::new(std::sync::OnceLock::<thanatos_net::Net>::new());
+    let to_stack = stack.clone();
+    let slot = Slot::new(
+        Net::new(mac, move |frame| {
+            if let Some(stack) = to_stack.get() {
+                stack.frame(frame);
+            }
+        }),
+        memory.clone(),
+        irq.clone(),
+        line,
+    );
+    let settings = thanatos_net::Settings {
+        default: config.network.default.clone(),
+        allow: config.network.allow.clone(),
+        deny: config.network.deny.clone(),
+        forward: config.network.forward.clone(),
+        on_denied: Box::new(|what| eprintln!("network policy denied {what}")),
+    };
+    let started = thanatos_net::Net::start(settings, mac, net::deliverer(Arc::downgrade(&slot)))
+        .map_err(io::Error::other)?;
+    let _ = stack.set(started.clone());
+    Ok((slot, Some(started)))
+}
+
 /// The windows on the bus, in guest-physical order of lookup.
 #[derive(Default)]
 pub struct Bus(Vec<(u64, u64, Arc<dyn Mmio>)>);
@@ -122,8 +205,8 @@ pub fn run(config: &Config, console: Console, ready: impl FnOnce(Control)) -> io
     let kernel_path = expand(&config.kernel);
     let kernel = std::fs::read(&kernel_path)
         .map_err(|e| io::Error::new(e.kind(), format!("kernel {}: {e}", kernel_path.display())))?;
-    // Two more windows: rng and vsock.
-    if config.disk.len() + 2 > layout::MAX_DEVICES {
+    // Three more windows: rng, vsock and net.
+    if config.disk.len() + 3 > layout::MAX_DEVICES {
         return Err(io::Error::other("too many disks"));
     }
     let memory = guest_memory(config.memory_mib)?;
@@ -171,12 +254,15 @@ pub fn run(config: &Config, console: Console, ready: impl FnOnce(Control)) -> io
         line_of(index + 1),
     );
     window(&mut bus, vsock.clone());
+    let (net_slot, network) = network(config, &memory, &irq, line_of(index + 2))?;
+    window(&mut bus, net_slot);
 
     let (entry, arg, uart) =
         load_guest(config, &memory, &kernel, &lines, &console, &irq, &mut bus)?;
     let bus = &bus;
     ready(Control {
         vsock,
+        network,
         console: console.clone(),
         stop: {
             let vm = stopper;
@@ -235,7 +321,7 @@ fn with_extra(mut cmdline: String, config: &Config) -> String {
 }
 
 #[cfg(target_arch = "x86_64")]
-type PortUart = Arc<Mutex<Serial>>;
+type PortUart = (Arc<Mutex<Serial>>, crate::rtc::Cmos);
 #[cfg(target_arch = "aarch64")]
 type PortUart = ();
 
@@ -260,7 +346,7 @@ fn load_guest(
     let uart = Arc::new(Mutex::new(Serial::new(console.clone())));
     let (kicked, irq) = (uart.clone(), irq.clone());
     console.set_kick(move || irq(layout::SERIAL_IRQ, kicked.lock().unwrap().line()));
-    Ok((entry, boot::x86_64::ZERO_PAGE, uart))
+    Ok((entry, boot::x86_64::ZERO_PAGE, (uart, Default::default())))
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -273,7 +359,7 @@ fn load_guest(
     irq: &Irq,
     bus: &mut Bus,
 ) -> io::Result<(u64, u64, PortUart)> {
-    use boot::aarch64::{SERIAL_BASE, SERIAL_SPI};
+    use boot::aarch64::{RTC_BASE, SERIAL_BASE, SERIAL_SPI};
     let cmdline = with_extra("console=ttyAMA0 root=/dev/vda rw panic=-1".into(), config);
     let windows: Vec<_> = devices
         .iter()
@@ -284,6 +370,7 @@ fn load_guest(
     let kicked = uart.clone();
     console.set_kick(move || kicked.update());
     bus.add(SERIAL_BASE, 0x1000, uart);
+    bus.add(RTC_BASE, 0x1000, Arc::new(crate::rtc::Pl031));
     Ok((entry, dtb, ()))
 }
 
@@ -308,8 +395,14 @@ fn vcpu_loop<V: Vcpu>(vcpu: &mut V, bus: &Bus, uart: &PortUart, irq: &Irq) -> io
 fn port_io(_: u16, _: &mut [u8], _: bool, _: &PortUart, _: &Irq) {}
 
 #[cfg(target_arch = "x86_64")]
-fn port_io(port: u16, data: &mut [u8], write: bool, serial: &PortUart, irq: &Irq) {
+fn port_io(port: u16, data: &mut [u8], write: bool, (serial, cmos): &PortUart, irq: &Irq) {
     let offset = port.wrapping_sub(layout::SERIAL_PORT);
+    match (port, write) {
+        (0x70, true) if !data.is_empty() => return cmos.select(data[0]),
+        (0x71, false) => return data.fill(cmos.read()),
+        (0x70 | 0x71, _) => return,
+        _ => (),
+    }
     if offset < 8 && !data.is_empty() {
         let mut uart = serial.lock().unwrap();
         if write {

@@ -27,6 +27,8 @@ fn boots_to_a_login_prompt() {
     std::fs::create_dir_all(&dir).unwrap();
     let root = dir.join("root.ext4");
     std::fs::copy(images.join("root.ext4"), &root).unwrap();
+    let grown = std::fs::File::options().write(true).open(&root).unwrap();
+    grown.set_len(4 << 30).unwrap();
     let config = dir.join("vm.toml");
     std::fs::write(
         &config,
@@ -61,6 +63,7 @@ fn boots_to_a_login_prompt() {
     let finished = booted.is_ok().then(|| {
         exec_works(&config);
         files_copy_both_ways(&config);
+        apt_installs_from_the_internet(&config);
         stops_gracefully(&config, &mut child);
     });
     let _ = child.kill();
@@ -136,6 +139,22 @@ fn files_copy_both_ways(config: &std::path::Path) {
         std::fs::read(&back).unwrap() == payload,
         "a failed get touched the local file"
     );
+}
+
+fn apt_installs_from_the_internet(config: &std::path::Path) {
+    let socket = config.with_file_name("api.sock");
+    let script = "apt-get update -qq && apt-get install -y -qq hello >/dev/null && hello";
+    let run = thanatos(&[
+        "exec",
+        "--socket",
+        socket.to_str().unwrap(),
+        "--",
+        "sh",
+        "-c",
+        script,
+    ]);
+    let said = String::from_utf8_lossy(&run.stdout);
+    assert!(said.contains("Hello, world!"), "{run:?}");
 }
 
 fn stops_gracefully(config: &std::path::Path, child: &mut std::process::Child) {
