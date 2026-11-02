@@ -37,6 +37,14 @@ if [ ! -f "/out/$IMAGE" ]; then
     cp "$KPATH" "/out/$IMAGE"
 fi
 
+# The agent: pinned toolchain from the repo, static musl so it runs on any guest userland.
+curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+. "$HOME/.cargo/env"
+cd /src
+rustup target add "$ARCH-unknown-linux-musl"
+CARGO_TARGET_DIR=/tmp/agent cargo build --locked --release -p thanatos-guest --target "$ARCH-unknown-linux-musl"
+AGENT="/tmp/agent/$ARCH-unknown-linux-musl/release/thanatos-guest"
+
 PACKAGES=$(cat /src/image/rootfs/packages.txt "/src/image/profiles/$PROFILE.txt" | tr '\n' ',' | sed 's/,$//')
 ROOT=/tmp/root
 rm -rf $ROOT
@@ -64,11 +72,22 @@ ExecStart=/usr/sbin/resize2fs /dev/vda
 [Install]
 WantedBy=multi-user.target
 UNIT
+install -m 0755 "$AGENT" $ROOT/usr/local/bin/thanatos-guest
+cat > $ROOT/etc/systemd/system/thanatos-guest.service <<UNIT
+[Unit]
+Description=Thanatos guest agent
+[Service]
+ExecStart=/usr/local/bin/thanatos-guest
+Restart=always
+RestartSec=1
+[Install]
+WantedBy=multi-user.target
+UNIT
 chroot $ROOT useradd -m -s /bin/bash -G sudo user
 chroot $ROOT passwd -d user
 chroot $ROOT passwd -d root
 echo 'user ALL=(ALL) NOPASSWD:ALL' > $ROOT/etc/sudoers.d/user
-chroot $ROOT systemctl enable systemd-networkd systemd-resolved thanatos-grow
+chroot $ROOT systemctl enable systemd-networkd systemd-resolved thanatos-grow thanatos-guest
 chroot $ROOT systemctl disable ssh 2>/dev/null || true
 ln -sf /run/systemd/resolve/stub-resolv.conf $ROOT/etc/resolv.conf
 rm -f $ROOT/etc/machine-id $ROOT/var/lib/dbus/machine-id

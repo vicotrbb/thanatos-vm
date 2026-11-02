@@ -1,13 +1,16 @@
 //! `thanatos`: thin commands over the machine and its API.
 use std::{
+    io::{Read, Write},
+    os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
 use thanatos_hv::{Host, Hypervisor};
 use thanatos_vmm::{
+    api::{self, AgentFrame, Body, Reply, Request},
     config::{Config, expand},
     console::Console,
-    machine,
+    machine, server,
 };
 
 const ROOT_DISK_BYTES: u64 = 16 << 30;
@@ -26,7 +29,19 @@ fn main() -> ExitCode {
         ["run", path] => run(path),
         ["image", "build", rest @ ..] => image_build(rest),
         ["vm", "create", name] => vm_create(name),
-        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name>".to_string()),
+        ["exec", "--socket", name, "--", argv @ ..] | ["exec", name, "--", argv @ ..]
+            if !argv.is_empty() =>
+        {
+            return exec(name, argv).unwrap_or_else(|message| {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            });
+        }
+        ["stop", name] => stop(name, true),
+        ["stop", name, "--force"] => stop(name, false),
+        ["file", "put", name, local, guest] => file_put(name, local, guest),
+        ["file", "get", name, guest, local] => file_get(name, guest, local),
+        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local>".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -41,8 +56,157 @@ fn run(path: &str) -> Result<(), String> {
     let config = Config::load(path.as_ref()).map_err(|e| e.to_string())?;
     let console = Console::default();
     console.add_output(std::io::stdout());
-    machine::run(&config, console).map_err(|e| e.to_string())?;
+    let socket = server::socket_path(&config);
+    let ended = machine::run(&config, console, |control| {
+        // A VM nothing can reach or stop should not keep running.
+        let stop = control.stop.clone();
+        if let Err(error) = server::serve(&socket, control) {
+            eprintln!("control API {}: {error}", socket.display());
+            stop();
+        }
+    });
+    let _ = std::fs::remove_file(&socket);
+    ended.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// A VM by name, or by socket path for a VM with its own `[api] socket`.
+fn connect(target: &str) -> Result<UnixStream, String> {
+    let path = if target.contains('/') {
+        PathBuf::from(target)
+    } else {
+        home_path(&format!("~/.thanatos/vms/{target}/api.sock"))
+    };
+    UnixStream::connect(&path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Sends one request on a new connection and returns its result.
+fn request(name: &str, body: Body) -> Result<serde_json::Value, String> {
+    let mut socket = connect(name)?;
+    let line = serde_json::to_string(&Request { id: 1, body }).map_err(|e| e.to_string())?;
+    writeln!(socket, "{line}").map_err(|e| e.to_string())?;
+    let line = server::read_line(&mut socket)
+        .map_err(|e| e.to_string())?
+        .ok_or("the VM closed the connection")?;
+    let reply: Reply = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    match reply.error {
+        Some(error) => Err(error),
+        None => Ok(reply.result.unwrap_or_default()),
+    }
+}
+
+/// Opens a binary channel from a token result.
+fn attach(name: &str, result: &serde_json::Value) -> Result<UnixStream, String> {
+    let token = result["token"].as_str().ok_or("no token in the reply")?;
+    let mut socket = connect(name)?;
+    writeln!(socket, "{}", serde_json::json!({ "attach": token })).map_err(|e| e.to_string())?;
+    Ok(socket)
+}
+
+fn exec(name: &str, argv: &[&str]) -> Result<ExitCode, String> {
+    let result = request(
+        name,
+        Body::Exec {
+            argv: argv.iter().map(ToString::to_string).collect(),
+            env: Default::default(),
+            cwd: None,
+            stdin: true,
+        },
+    )?;
+    let mut socket = attach(name, &result)?;
+    let mut to_guest = socket.try_clone().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let mut buffer = vec![0; 1 << 16];
+        while let Ok(count @ 1..) = std::io::stdin().read(&mut buffer) {
+            if api::write_frame(&mut to_guest, &AgentFrame::Stdin, &buffer[..count]).is_err() {
+                return;
+            }
+        }
+        let _ = api::write_frame(&mut to_guest, &AgentFrame::Stdin, &[]);
+    });
+    loop {
+        let Some((frame, body)) =
+            api::read_frame::<AgentFrame>(&mut socket).map_err(|e| e.to_string())?
+        else {
+            return Err("the agent closed the stream before the exit status".into());
+        };
+        match frame {
+            AgentFrame::Stdout => {
+                let mut out = std::io::stdout();
+                out.write_all(&body)
+                    .and_then(|()| out.flush())
+                    .map_err(|e| e.to_string())?;
+            }
+            AgentFrame::Stderr => std::io::stderr()
+                .write_all(&body)
+                .map_err(|e| e.to_string())?,
+            AgentFrame::Exit { code } => return Ok(ExitCode::from(code as u8)),
+            AgentFrame::Error { message } => return Err(message),
+            AgentFrame::Stdin | AgentFrame::Data | AgentFrame::Done => (),
+        }
+    }
+}
+
+fn stop(name: &str, graceful: bool) -> Result<(), String> {
+    let timeout = 30;
+    request(name, Body::Stop { graceful, timeout }).map(|_| ())
+}
+
+/// The agent's answer that ends a file transfer.
+fn finished(frame: AgentFrame) -> Result<bool, String> {
+    match frame {
+        AgentFrame::Done => Ok(true),
+        AgentFrame::Error { message } => Err(message),
+        _ => Ok(false),
+    }
+}
+
+fn file_put(name: &str, local: &str, guest: &str) -> Result<(), String> {
+    let text = |e: std::io::Error| e.to_string();
+    let mut file = std::fs::File::open(local).map_err(|e| format!("{local}: {e}"))?;
+    let mode = file.metadata().map_err(text)?.permissions().mode() & 0o777;
+    let result = request(
+        name,
+        Body::FilePut {
+            path: guest.into(),
+            mode: Some(mode),
+        },
+    )?;
+    let mut socket = attach(name, &result)?;
+    let mut buffer = vec![0; api::MAX_BODY];
+    loop {
+        let count = file.read(&mut buffer).map_err(text)?;
+        api::write_frame(&mut socket, &AgentFrame::Data, &buffer[..count]).map_err(text)?;
+        if count == 0 {
+            break;
+        }
+    }
+    while let Some((frame, _)) = api::read_frame::<AgentFrame>(&mut socket).map_err(text)? {
+        if finished(frame)? {
+            return Ok(());
+        }
+    }
+    Err("the agent closed the stream before finishing".into())
+}
+
+fn file_get(name: &str, guest: &str, local: &str) -> Result<(), String> {
+    let text = |e: std::io::Error| e.to_string();
+    let result = request(name, Body::FileGet { path: guest.into() })?;
+    let mut socket = attach(name, &result)?;
+    // The first frame decides: a missing guest file must not truncate the local one.
+    let mut file = None;
+    while let Some((frame, body)) = api::read_frame::<AgentFrame>(&mut socket).map_err(text)? {
+        let done = finished(frame)?;
+        let out = match &mut file {
+            Some(out) => out,
+            None => file.insert(std::fs::File::create(local).map_err(|e| format!("{local}: {e}"))?),
+        };
+        out.write_all(&body).map_err(text)?;
+        if done {
+            return Ok(());
+        }
+    }
+    Err("the agent closed the stream before finishing".into())
 }
 
 fn image_arch() -> &'static str {

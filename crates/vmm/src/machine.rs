@@ -7,7 +7,7 @@ use crate::{
     GuestMemory, boot,
     config::{Config, expand},
     console::Console,
-    devices::blk::Blk,
+    devices::{blk::Blk, rng::Rng, vsock::Vsock},
     mmio::{Irq, Mmio, Slot},
 };
 use std::{
@@ -34,6 +34,14 @@ mod layout {
     pub const MMIO_WINDOW: u64 = 0x200;
     pub const FIRST_IRQ: u32 = 32;
     pub const MAX_DEVICES: usize = 32;
+}
+
+/// What the control API drives while the machine runs.
+#[derive(Clone)]
+pub struct Control {
+    pub vsock: Arc<Slot<Vsock>>,
+    pub console: Console,
+    pub stop: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Exit status of the guest as the process reports it.
@@ -110,11 +118,12 @@ impl Bus {
     }
 }
 
-pub fn run(config: &Config, console: Console) -> io::Result<Ended> {
+pub fn run(config: &Config, console: Console, ready: impl FnOnce(Control)) -> io::Result<Ended> {
     let kernel_path = expand(&config.kernel);
     let kernel = std::fs::read(&kernel_path)
         .map_err(|e| io::Error::new(e.kind(), format!("kernel {}: {e}", kernel_path.display())))?;
-    if config.disk.len() > layout::MAX_DEVICES {
+    // Two more windows: rng and vsock.
+    if config.disk.len() + 2 > layout::MAX_DEVICES {
         return Err(io::Error::other("too many disks"));
     }
     let memory = guest_memory(config.memory_mib)?;
@@ -125,6 +134,7 @@ pub fn run(config: &Config, console: Console) -> io::Result<Ended> {
             let _ = vm.set_irq(line, level);
         })
     };
+    let stopper = vm.clone();
     let vm = &*vm;
 
     let mut bus = Bus::default();
@@ -141,9 +151,38 @@ pub fn run(config: &Config, console: Console) -> io::Result<Ended> {
         lines.push((base, line));
     }
 
+    let mut window = |bus: &mut Bus, device: Arc<dyn Mmio>| {
+        let index = lines.len();
+        let (base, line) = (
+            layout::MMIO_BASE + index as u64 * layout::MMIO_WINDOW,
+            layout::FIRST_IRQ + index as u32,
+        );
+        bus.add(base, layout::MMIO_WINDOW, device);
+        lines.push((base, line));
+    };
+    let line_of = |index: usize| layout::FIRST_IRQ + index as u32;
+    let index = config.disk.len();
+    let rng = Slot::new(Rng::new()?, memory.clone(), irq.clone(), line_of(index));
+    window(&mut bus, rng);
+    let vsock = Slot::new(
+        Vsock::default(),
+        memory.clone(),
+        irq.clone(),
+        line_of(index + 1),
+    );
+    window(&mut bus, vsock.clone());
+
     let (entry, arg, uart) =
         load_guest(config, &memory, &kernel, &lines, &console, &irq, &mut bus)?;
     let bus = &bus;
+    ready(Control {
+        vsock,
+        console: console.clone(),
+        stop: {
+            let vm = stopper;
+            Arc::new(move || vm.stop())
+        },
+    });
     let ended = Mutex::new(None);
     // Held until all vCPUs exist: KVM's GIC cannot initialise once one has entered the guest.
     let gate = &Mutex::new(());

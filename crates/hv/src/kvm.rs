@@ -78,7 +78,8 @@ pub struct KvmVm {
     fd: VmFd,
     #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
     vcpus: u32,
-    threads: Arc<Mutex<Vec<libc::pthread_t>>>,
+    // As usize: pthread_t is a raw pointer on musl, which the agent links against.
+    threads: Arc<Mutex<Vec<usize>>>,
     stopped: AtomicBool,
     #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
     arch: arch::VmState,
@@ -94,7 +95,7 @@ impl Vm for KvmVm {
         self.threads
             .lock()
             .unwrap()
-            .push(unsafe { libc::pthread_self() });
+            .push(unsafe { libc::pthread_self() } as usize);
         Ok(KvmVcpu {
             vm: self,
             fd,
@@ -121,7 +122,7 @@ impl Vm for KvmVm {
                 for &thread in threads.iter() {
                     // SAFETY: a vCPU removes its thread under this lock before the thread ends,
                     // so every id in the list is live.
-                    unsafe { libc::pthread_kill(thread, KICK_SIGNAL) };
+                    unsafe { libc::pthread_kill(thread as libc::pthread_t, KICK_SIGNAL) };
                 }
                 drop(threads);
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -139,7 +140,7 @@ pub struct KvmVcpu<'a> {
 impl Drop for KvmVcpu<'_> {
     fn drop(&mut self) {
         // SAFETY: pthread_self has no preconditions.
-        let me = unsafe { libc::pthread_self() };
+        let me = unsafe { libc::pthread_self() } as usize;
         self.vm
             .threads
             .lock()
