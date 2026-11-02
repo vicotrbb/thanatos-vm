@@ -27,7 +27,8 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         ["doctor"] => doctor(),
         ["doctor", "--sign"] => sign().and_then(|()| reexec_doctor()),
-        ["run", path] => run(path),
+        ["run", path] => run(path, None),
+        ["run", path, "--display", mode] => run(path, Some(mode)),
         ["image", "build", rest @ ..] => image_build(rest),
         ["vm", "create", name] => vm_create(name),
         ["exec", "--socket", name, "--", argv @ ..] | ["exec", name, "--", argv @ ..]
@@ -54,7 +55,7 @@ fn main() -> ExitCode {
         ["stop", name, "--force"] => stop(name, false),
         ["file", "put", name, local, guest] => file_put(name, local, guest),
         ["file", "get", name, guest, local] => file_get(name, guest, local),
-        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local> | status <name> | screenshot <name> | display <name> headless|window|vnc [bind] [password] | key <name> <code[+code...]> | console <name> | forward add|remove <name> <spec> | events <name>".to_string()),
+        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> [--display headless|window|vnc] | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local> | status <name> | screenshot <name> | display <name> headless|window|vnc [bind] [password] | key <name> <code[+code...]> | console <name> | forward add|remove <name> <spec> | events <name>".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -65,12 +66,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Windows live on the main thread on macOS, so with the feature the VM runs beside it.
-#[cfg(feature = "window")]
-fn run(path: &str) -> Result<(), String> {
-    let path = path.to_owned();
+/// Windows live on the main thread on macOS, so the VM runs beside it.
+fn run(path: &str, display: Option<&str>) -> Result<(), String> {
+    let (path, display) = (path.to_owned(), display.map(str::to_owned));
     thanatos_vmm::window::host(move || {
-        let ended = run_machine(&path);
+        let ended = run_machine(&path, display);
         if let Err(message) = &ended {
             eprintln!("{message}");
         }
@@ -79,13 +79,11 @@ fn run(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(feature = "window"))]
-fn run(path: &str) -> Result<(), String> {
-    run_machine(path)
-}
-
-fn run_machine(path: &str) -> Result<(), String> {
-    let config = Config::load(path.as_ref()).map_err(|e| e.to_string())?;
+fn run_machine(path: &str, display: Option<String>) -> Result<(), String> {
+    let mut config = Config::load(path.as_ref()).map_err(|e| e.to_string())?;
+    if let Some(mode) = display {
+        config.display.mode = mode;
+    }
     let console = Console::default();
     console.add_output(std::io::stdout());
     let socket = server::socket_path(&config);

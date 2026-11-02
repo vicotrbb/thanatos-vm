@@ -67,13 +67,14 @@ An address other machines can reach needs a password: `thanatos display dev vnc 
 
 ## Window
 
-The window is behind a Cargo feature, which `just image` builds with: `cargo build --release -p thanatos-cli --features window`.
+A VM opens a window by default. To run without one:
 
 ```sh
-thanatos display dev window    # or mode = "window" in vm.toml
+thanatos run vm.toml --display headless   # or vnc, or mode = "headless" in vm.toml
+thanatos display dev window               # bring it back on a running VM
 ```
 
-The window takes the keyboard and pointer. Closing it leaves the VM running, headless. On Linux it needs a graphical session; without one the request fails and the VM carries on.
+The window takes the keyboard and pointer. Closing it leaves the VM running, headless. A host with no graphical session warns and carries on headless.
 
 ## Network
 

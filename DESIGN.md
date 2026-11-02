@@ -41,7 +41,7 @@ The user's project Cubebot runs each AI agent in a KVM guest of a 5,000-line in-
 2. Guest architecture equals host architecture. Two guest images, x86_64 and aarch64, built from one recipe. The user chose native speed wherever a hypervisor exists over a single emulated image.
 3. Devices: virtio-blk, virtio-net, virtio-vsock, virtio-rng, virtio-gpu (2D), virtio-input (keyboard, absolute pointer), and a serial console. All virtio over the MMIO transport.
 4. Networking without root through a user-mode TCP/IP stack in the VMM, with an outbound policy and inbound port forwards. A tap backend on Linux for those who have the capability.
-5. A screen the host owns: the guest's scanout lives in VMM memory, screenshots are read from it, input enters only through the VMM. Display sinks: headless, a built-in VNC server, and an optional native window.
+5. A screen the host owns: the guest's scanout lives in VMM memory, screenshots are read from it, input enters only through the VMM. Display sinks: headless, a built-in VNC server, and a native window.
 6. A control API on a local socket, a CLI over it, and a Rust library that the CLI is written against.
 7. An optional guest agent, `thanatos-guest`, a static binary that offers exec, file copy and clean shutdown over vsock.
 8. A reproducible guest image build, `thanatos image build`, that produces a kernel and a root image for either architecture, from any host that can run a container.
@@ -98,7 +98,7 @@ Each is a sensible default that the user has not explicitly approved. Overrule a
 - rust-vmm's `virtio-queue` and `vm-memory` for the virtqueue and guest memory rather than a hand-written queue.
 - `smoltcp` as the TCP/IP stack under the user-mode network.
 - No async runtime. Threads and blocking I/O.
-- Headless and VNC display sinks in the core binary; a native window behind a Cargo feature that is off by default.
+- Headless and VNC display sinks in the core binary; a native window, the default sink.
 - Windows deferred to 1.1 so that 1.0 is three backends on two kernels, not four on three.
 - Where no hypervisor exists, refuse. The user chose native speed; whether a slow emulated fallback is ever wanted is an open question for them (see 12).
 - License: Apache-2.0 OR MIT, the Rust ecosystem default. Open question for the user (see 12).
@@ -280,9 +280,9 @@ The promise is exactly that, and no more: a screenshot is the host's copy of the
 
 Display sinks, chosen in configuration and switchable at runtime:
 
-- **headless**: no output; screenshots and input through the API only. The default.
+- **headless**: no output; screenshots and input through the API only.
 - **vnc**: a built-in RFB 3.8 server on a configured bind address with optional VNC authentication, raw and CopyRect encodings in version 1, ZRLE later. Any VNC client, including noVNC in a browser, shows the screen and sends input. The server is Thanatos's own, about 600 lines, because every VNC crate on crates.io is either a client or unmaintained. (my call)
-- **window** (Cargo feature `window`, off by default): a native window through `winit` and `softbuffer`. Off by default so the core binary has no windowing dependencies and builds on headless CI.
+- **window**: a native window through `winit` and `softbuffer`, always built and the default. `thanatos run --display` or `mode` turns it off when running.
 
 Inside the guest, the stock kernel's `virtio_gpu` driver provides `/dev/dri/card0` and a framebuffer console, and `virtio_input` provides evdev devices. Any Wayland compositor or X server that works on a plain DRM device works unchanged: the image recipe ships a minimal session (see 5) and the user can `apt install` another.
 
@@ -426,7 +426,7 @@ Each step ends with something that runs and a test that proves it. Nothing later
 ## 11. Constraints
 
 - Rust stable, pinned in `rust-toolchain.toml`. No nightly features.
-- Dependencies, locked: `kvm-ioctls`, `kvm-bindings`, `vm-memory`, `vm-fdt`, `virtio-queue`, `virtio-bindings`, `linux-loader` (bzImage and Image parsing), `applevisor` and `applevisor-sys`, `windows` with the hypervisor feature, `smoltcp`, `serde` and `serde_json`, `nix` or `libc`, `png` for screenshots, and `winit` and `softbuffer` behind the `window` feature. Adding a dependency is a design change recorded in this document.
+- Dependencies, locked: `kvm-ioctls`, `kvm-bindings`, `vm-memory`, `vm-fdt`, `virtio-queue`, `virtio-bindings`, `linux-loader` (bzImage and Image parsing), `applevisor` and `applevisor-sys`, `windows` with the hypervisor feature, `smoltcp`, `serde` and `serde_json`, `nix` or `libc`, `png` for screenshots, and `winit` and `softbuffer`. Adding a dependency is a design change recorded in this document.
 - No async runtime, no C dependencies, no build-time code generation beyond `serde` derives.
 - `unsafe` only in `thanatos-hv`.
 - Cyclomatic complexity and function length limits set by `clippy.toml` at the workspace root.
@@ -475,7 +475,7 @@ Guest physical addresses within the ranges in 4.4; the exact `Exit` enum shape; 
 - 2026-11-02: amends 4.7: vsock refuses guest-initiated connections; no Unix socket per port until a guest service needs one.
 - 2026-11-02: amends 4.8: host loopback, 0.0.0.0/8 and 10.0.2.0/24 (the gateway reaches host loopback) open only by an explicit allow, even with default allow.
 - 2026-11-02: amends 4.11: VNC sends raw only (CopyRect is optional for a server); a non-loopback address without a password is refused.
-- 2026-11-02: amends 4.11: closing the window leaves the VM running, headless; with the feature, `thanatos run` keeps the main thread for the window and creates the event loop only on the first open.
+- 2026-11-02: amends 4.11: closing the window leaves the VM running, headless; `thanatos run` keeps the main thread for the window and creates the event loop only on the first open; no Cargo features, everything is built and turned off at run time; a host that cannot open a window warns and runs headless.
 - 2026-11-02: amends 4.9: `screenshot` returns a token for its bytes, as other binary channels do, plus width and height.
 - 2026-11-02: amends 4.9 and 4.10: `exec`, `file put` and `file get` tokens carry the agent's frames directly.
 - 2026-11-02: amends 5.1: sway starts from an autologin on tty1 through `.bash_profile`, no seatd, a flat wallpaper for the desktop check.

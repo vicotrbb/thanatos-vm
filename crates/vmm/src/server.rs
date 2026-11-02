@@ -79,7 +79,6 @@ struct Server {
     vcpus: u32,
     memory_mib: u64,
     vnc_bind: String,
-    #[cfg(feature = "window")]
     name: String,
     display: Arc<Mutex<Display>>,
 }
@@ -89,7 +88,6 @@ struct Server {
 struct Display {
     mode: String,
     vnc: Option<Vnc>,
-    #[cfg(feature = "window")]
     window: Option<crate::window::Window>,
 }
 
@@ -143,14 +141,19 @@ pub fn serve(path: &Path, config: &Config, control: Control) -> io::Result<()> {
         vcpus: config.vcpus,
         memory_mib: config.memory_mib,
         vnc_bind: config.display.vnc_bind.clone(),
-        #[cfg(feature = "window")]
         name: config.name.clone(),
         display: Arc::new(Mutex::new(Display {
             mode: "headless".into(),
             ..Display::default()
         })),
     });
-    server.set_display(&config.display.mode, None)?;
+    // A host with no graphical session still runs the VM: a window is not worth losing it for.
+    if let Err(error) = server.set_display(&config.display.mode, None) {
+        if config.display.mode != "window" {
+            return Err(error);
+        }
+        eprintln!("window unavailable, continuing headless: {error}");
+    }
     if config.agent.enabled {
         let server = server.clone();
         std::thread::spawn(move || server.watch_agent());
@@ -244,7 +247,6 @@ impl Server {
                     self.control.input.clone(),
                 )?);
             }
-            #[cfg(feature = "window")]
             "window" => {
                 // Closing the window leaves the VM running, headless.
                 let display = self.display.clone();
@@ -264,12 +266,6 @@ impl Server {
                         });
                     }),
                 )?);
-            }
-            #[cfg(not(feature = "window"))]
-            "window" => {
-                return Err(io::Error::other(
-                    "this build has no window sink: build with --features window",
-                ));
             }
             other => return Err(io::Error::other(format!("unknown display mode {other:?}"))),
         }

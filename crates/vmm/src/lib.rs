@@ -12,6 +12,5 @@ pub mod rtc;
 pub mod screen;
 pub mod serial;
 pub mod server;
-#[cfg(feature = "window")]
 pub mod window;
 pub use thanatos_hv::GuestMemory;

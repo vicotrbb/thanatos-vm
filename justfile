@@ -4,8 +4,7 @@ default_arch := if arch() == "aarch64" { "aarch64" } else { "x86_64" }
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
-    cargo clippy --workspace --all-targets --features thanatos-cli/window -- -D warnings
-    cargo test --workspace --features thanatos-cli/window
+    cargo test --workspace
 
 # Boots the current desktop-profile image on this host: agent, network, screen and input.
 boot:
@@ -15,7 +14,7 @@ image arch=default_arch profile="desktop": _build
     {{bin}} image build --arch {{arch}} --profile {{profile}}
 
 _build:
-    cargo build --release -p thanatos-cli --features window
+    cargo build --release -p thanatos-cli
     {{ if os() == "macos" { bin + " doctor --sign" } else { "true" } }}
 
 # Runs each device and parser fuzzer for a minute.

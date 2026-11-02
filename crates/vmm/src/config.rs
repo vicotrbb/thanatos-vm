@@ -77,7 +77,7 @@ pub struct Display {
 impl Default for Display {
     fn default() -> Self {
         Self {
-            mode: "headless".into(),
+            mode: "window".into(),
             width: 1280,
             height: 800,
             vnc_bind: "127.0.0.1:5901".into(),

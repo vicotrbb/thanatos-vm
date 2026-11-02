@@ -123,6 +123,7 @@ fn the_desktop_shows_its_wallpaper_and_takes_input() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_thanatos"))
         .arg("run")
         .arg(&config)
+        .args(["--display", "headless"])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
