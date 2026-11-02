@@ -203,6 +203,19 @@ mod tests {
     }
 
     #[test]
+    fn the_zero_page_and_mp_table_match_their_golden_blob() {
+        let memory = memory(64 << 20);
+        load(&memory, &bzimage(), "console=ttyS0", 2).unwrap();
+        let mut blob = at::<4096>(&memory, ZERO_PAGE).to_vec();
+        blob.extend_from_slice(&mp_table(2));
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/boot/golden/x86_64.bin");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(path, &blob).unwrap();
+        }
+        assert_eq!(blob, std::fs::read(path).unwrap());
+    }
+
+    #[test]
     fn places_the_kernel_and_boot_parameters() {
         let memory = memory(64 << 20);
         let entry = load(&memory, &bzimage(), "console=ttyS0", 2).unwrap();
