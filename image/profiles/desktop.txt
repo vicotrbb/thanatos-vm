@@ -1,0 +1,4 @@
+sway
+foot
+chromium
+seatd

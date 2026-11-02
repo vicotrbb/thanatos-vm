@@ -391,6 +391,7 @@ dependencies = [
  "serde_json",
  "thanatos-hv",
  "thanatos-net",
+ "virtio-bindings",
  "virtio-queue",
  "vm-fdt",
  "vm-memory",

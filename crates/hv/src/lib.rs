@@ -31,7 +31,7 @@ pub struct Unavailable {
 }
 
 pub trait Hypervisor {
-    type Vm: Vm;
+    type Vm: Vm + 'static;
     /// What `thanatos doctor` reports.
     fn available() -> Result<(), Unavailable>;
     fn create_vm(memory: &GuestMemory, vcpus: u32) -> io::Result<Self::Vm>;
@@ -56,6 +56,8 @@ pub trait Vcpu {
 }
 
 pub enum Exit<'a> {
+    /// Nothing for the caller to do; run again.
+    Again,
     /// On a read the handler fills `data`, which the next `run` hands to the guest.
     Mmio {
         address: u64,

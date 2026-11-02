@@ -447,3 +447,15 @@ Guest physical addresses within the ranges in 4.4; the exact `Exit` enum shape; 
 - Microsoft: [Windows Hypervisor Platform API](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform), available since the April 2018 update; arm64 support reported by `WHvGetCapability`; on arm64 the partition must use the emulated GIC.
 - Crates, versions as of 2026-11-02 on crates.io: `kvm-ioctls` 0.25.1, `kvm-bindings` 0.14.2, `vm-memory` 0.18.0, `vm-fdt` 0.3.0, `virtio-queue` 0.18.0, `virtio-bindings` 0.2.7, `linux-loader` 0.14.0, `applevisor` 1.0.0, `windows` 0.62.2, `smoltcp` 0.14.0.
 - Apple's WWDC 2025 announcement that macOS 26 is the last release for Intel Macs, the reason there is no x86 Hypervisor.framework backend.
+
+## Builder's calls
+
+- 2026-11-02: no `linux-loader`; bzImage and arm64 Image headers are parsed by hand in `boot/`, fewer lines than adapting to it.
+- 2026-11-02: amends 4.3: `blk` is served synchronously on the vCPU thread that kicks it.
+- 2026-11-02: amends 4.4: the arm64 Image loads at RAM base + its header's `text_offset`, as the boot protocol requires, not a fixed +0x80000.
+- 2026-11-02: PSCI lives inside the HVF backend, so it is not in the `Exit` enum.
+- 2026-11-02: section 11 has no TOML crate; `config.rs` parses the subset into a JSON tree for serde.
+- 2026-11-02: amends 4.12: `[network] tap` names the device for the `tap` backend.
+- 2026-11-02: `image build` runs from a checkout, since the recipe lives there.
+- 2026-11-02: `vm create` grows the root disk sparse to 16 GiB; the guest resizes on first boot.
+- 2026-11-02: no `clippy.toml` or `cargo deny`: the brief says exactly three gates.

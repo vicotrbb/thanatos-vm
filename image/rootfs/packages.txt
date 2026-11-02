@@ -1,0 +1,11 @@
+systemd
+systemd-sysv
+systemd-resolved
+dbus
+udev
+sudo
+openssh-server
+ca-certificates
+curl
+iproute2
+e2fsprogs
