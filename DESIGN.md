@@ -475,7 +475,7 @@ Guest physical addresses within the ranges in 4.4; the exact `Exit` enum shape; 
 - 2026-11-02: amends 4.7: vsock refuses guest-initiated connections; no Unix socket per port until a guest service needs one.
 - 2026-11-02: amends 4.8: host loopback, 0.0.0.0/8 and 10.0.2.0/24 (the gateway reaches host loopback) open only by an explicit allow, even with default allow.
 - 2026-11-02: amends 4.11: VNC sends raw only (CopyRect is optional for a server); a non-loopback address without a password is refused.
-- 2026-11-02: amends 4.11: the `window` sink and its feature are not built; `display window` says so. VNC covers viewing.
+- 2026-11-02: amends 4.11: closing the window leaves the VM running, headless; with the feature, `thanatos run` keeps the main thread for the window and creates the event loop only on the first open.
 - 2026-11-02: amends 4.9: `screenshot` returns a token for its bytes, as other binary channels do, plus width and height.
 - 2026-11-02: amends 4.9 and 4.10: `exec`, `file put` and `file get` tokens carry the agent's frames directly.
 - 2026-11-02: amends 5.1: sway starts from an autologin on tty1 through `.bash_profile`, no seatd, a flat wallpaper for the desktop check.

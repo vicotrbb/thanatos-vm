@@ -65,6 +65,16 @@ thanatos display dev headless
 
 An address other machines can reach needs a password: `thanatos display dev vnc 0.0.0.0:5901 <password>`. VNC authentication is weak by nature, so prefer an SSH tunnel.
 
+## Window
+
+The window is behind a Cargo feature, which `just image` builds with: `cargo build --release -p thanatos-cli --features window`.
+
+```sh
+thanatos display dev window    # or mode = "window" in vm.toml
+```
+
+The window takes the keyboard and pointer. Closing it leaves the VM running, headless. On Linux it needs a graphical session; without one the request fails and the VM carries on.
+
 ## Network
 
 The guest gets 10.0.2.15 behind user-mode NAT, with outbound policy and forwards in `[network]`:

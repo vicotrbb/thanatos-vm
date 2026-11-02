@@ -79,7 +79,18 @@ struct Server {
     vcpus: u32,
     memory_mib: u64,
     vnc_bind: String,
-    display: Mutex<(String, Option<Vnc>)>,
+    #[cfg(feature = "window")]
+    name: String,
+    display: Arc<Mutex<Display>>,
+}
+
+/// The mode, and the running sink: dropping a sink stops it.
+#[derive(Default)]
+struct Display {
+    mode: String,
+    vnc: Option<Vnc>,
+    #[cfg(feature = "window")]
+    window: Option<crate::window::Window>,
 }
 
 pub fn socket_path(config: &Config) -> PathBuf {
@@ -132,7 +143,12 @@ pub fn serve(path: &Path, config: &Config, control: Control) -> io::Result<()> {
         vcpus: config.vcpus,
         memory_mib: config.memory_mib,
         vnc_bind: config.display.vnc_bind.clone(),
-        display: Mutex::new(("headless".into(), None)),
+        #[cfg(feature = "window")]
+        name: config.name.clone(),
+        display: Arc::new(Mutex::new(Display {
+            mode: "headless".into(),
+            ..Display::default()
+        })),
     });
     server.set_display(&config.display.mode, None)?;
     if config.agent.enabled {
@@ -207,30 +223,57 @@ impl Server {
     }
 
     fn set_display(&self, mode: &str, vnc: Option<VncOptions>) -> io::Result<()> {
-        let sink = match mode {
-            "headless" => None,
+        let mut next = Display {
+            mode: mode.into(),
+            ..Display::default()
+        };
+        match mode {
+            "headless" => (),
             "vnc" => {
                 let options = vnc.unwrap_or(VncOptions {
                     bind: None,
                     password: None,
                 });
                 let bind = options.bind.unwrap_or_else(|| self.vnc_bind.clone());
-                let mut display = self.display.lock().unwrap();
                 // The old listener must let go first in case the address is the same.
-                display.1 = None;
-                drop(display);
-                Some(Vnc::start(
+                self.display.lock().unwrap().vnc = None;
+                next.vnc = Some(Vnc::start(
                     &bind,
                     options.password,
                     self.control.screen.clone(),
                     self.control.input.clone(),
-                )?)
+                )?);
             }
-            // shortcut: the window sink is not built, add winit and softbuffer behind the `window` feature when a local viewer is wanted.
-            "window" => return Err(io::Error::other("this build has no window sink: use vnc")),
+            #[cfg(feature = "window")]
+            "window" => {
+                // Closing the window leaves the VM running, headless.
+                let display = self.display.clone();
+                let events = self.control.events.clone();
+                // Not under the lock: the window's thread takes it when the window closes.
+                next.window = Some(crate::window::open(
+                    format!("Thanatos: {}", self.name),
+                    self.control.screen.clone(),
+                    self.control.input.clone(),
+                    Box::new(move || {
+                        *display.lock().unwrap() = Display {
+                            mode: "headless".into(),
+                            ..Display::default()
+                        };
+                        events.emit(&Event::DisplayMode {
+                            mode: "headless".into(),
+                        });
+                    }),
+                )?);
+            }
+            #[cfg(not(feature = "window"))]
+            "window" => {
+                return Err(io::Error::other(
+                    "this build has no window sink: build with --features window",
+                ));
+            }
             other => return Err(io::Error::other(format!("unknown display mode {other:?}"))),
-        };
-        *self.display.lock().unwrap() = (mode.into(), sink);
+        }
+        *self.display.lock().unwrap() = next;
         self.control
             .events
             .emit(&Event::DisplayMode { mode: mode.into() });
@@ -364,7 +407,7 @@ impl Server {
                     "vcpus": self.vcpus,
                     "memory_mib": self.memory_mib,
                     "devices": ["blk", "rng", "vsock", "net", "gpu", "input"],
-                    "display_mode": self.display.lock().unwrap().0,
+                    "display_mode": self.display.lock().unwrap().mode,
                     "agent_alive": *self.agent_alive.lock().unwrap(),
                 }))
             }
@@ -391,7 +434,7 @@ impl Server {
             }
             Body::Display { mode, vnc } => {
                 self.set_display(&mode, vnc)?;
-                let bound = self.display.lock().unwrap().1.as_ref().map(Vnc::address);
+                let bound = self.display.lock().unwrap().vnc.as_ref().map(Vnc::address);
                 Ok(json!({ "mode": mode, "address": bound.map(|a| a.to_string()) }))
             }
             Body::ForwardAdd { spec } => self.forward(|net| net.add_forward(&spec)),

@@ -41,6 +41,7 @@ fn main() -> ExitCode {
         ["status", name] => show(name, Body::Status),
         ["screenshot", name] => screenshot(name),
         ["display", name, "headless"] => display(name, "headless", None),
+        ["display", name, "window"] => display(name, "window", None),
         ["display", name, "vnc"] => display(name, "vnc", None),
         ["display", name, "vnc", bind] => display(name, "vnc", Some((*bind).into())),
         ["display", name, "vnc", bind, password] => display_with_password(name, bind, password),
@@ -53,7 +54,7 @@ fn main() -> ExitCode {
         ["stop", name, "--force"] => stop(name, false),
         ["file", "put", name, local, guest] => file_put(name, local, guest),
         ["file", "get", name, guest, local] => file_get(name, guest, local),
-        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local> | status <name> | screenshot <name> | display <name> headless|vnc [bind] [password] | key <name> <code[+code...]> | console <name> | forward add|remove <name> <spec> | events <name>".to_string()),
+        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local> | status <name> | screenshot <name> | display <name> headless|window|vnc [bind] [password] | key <name> <code[+code...]> | console <name> | forward add|remove <name> <spec> | events <name>".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -64,7 +65,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// Windows live on the main thread on macOS, so with the feature the VM runs beside it.
+#[cfg(feature = "window")]
 fn run(path: &str) -> Result<(), String> {
+    let path = path.to_owned();
+    thanatos_vmm::window::host(move || {
+        let ended = run_machine(&path);
+        if let Err(message) = &ended {
+            eprintln!("{message}");
+        }
+        std::process::exit(ended.is_err().into());
+    });
+    Ok(())
+}
+
+#[cfg(not(feature = "window"))]
+fn run(path: &str) -> Result<(), String> {
+    run_machine(path)
+}
+
+fn run_machine(path: &str) -> Result<(), String> {
     let config = Config::load(path.as_ref()).map_err(|e| e.to_string())?;
     let console = Console::default();
     console.add_output(std::io::stdout());
