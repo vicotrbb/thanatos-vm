@@ -17,3 +17,6 @@ path = "src/main.rs"
 thanatos-hv = { path = "../hv" }
 thanatos-vmm = { path = "../vmm" }
 serde_json = "1"
+
+[dev-dependencies]
+png = "0.18"

@@ -1,4 +1,4 @@
 sway
 foot
 chromium
-seatd
+fonts-dejavu-core

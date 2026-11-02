@@ -4,16 +4,22 @@ use crate::pl011::Pl011;
 #[cfg(target_arch = "x86_64")]
 use crate::serial::Serial;
 use crate::{
-    GuestMemory, boot,
+    GuestMemory,
+    api::Event,
+    boot,
     config::{Config, expand},
     console::Console,
     devices::{
         blk::Blk,
+        gpu::Gpu,
+        input::{Input, InputPorts, Kind},
         net::{self, Net},
         rng::Rng,
         vsock::Vsock,
     },
     mmio::{Irq, Mmio, Slot},
+    screen::Screen,
+    server::Events,
 };
 use std::{
     fs::File,
@@ -48,6 +54,9 @@ pub struct Control {
     /// `None` on a tap, where the operator's network applies instead.
     pub network: Option<thanatos_net::Net>,
     pub console: Console,
+    pub screen: Arc<Screen>,
+    pub input: InputPorts,
+    pub events: Arc<Events>,
     pub stop: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -135,6 +144,7 @@ fn network(
     memory: &GuestMemory,
     irq: &Irq,
     line: u32,
+    events: &Arc<Events>,
 ) -> io::Result<(Arc<Slot<Net>>, Option<thanatos_net::Net>)> {
     let mac = net::mac_from_name(&config.name);
     if config.network.backend == "tap" {
@@ -164,7 +174,10 @@ fn network(
         allow: config.network.allow.clone(),
         deny: config.network.deny.clone(),
         forward: config.network.forward.clone(),
-        on_denied: Box::new(|what| eprintln!("network policy denied {what}")),
+        on_denied: {
+            let events = events.clone();
+            Box::new(move |destination| events.emit(&Event::NetworkDenied { destination }))
+        },
     };
     let started = thanatos_net::Net::start(settings, mac, net::deliverer(Arc::downgrade(&slot)))
         .map_err(io::Error::other)?;
@@ -201,12 +214,17 @@ impl Bus {
     }
 }
 
-pub fn run(config: &Config, console: Console, ready: impl FnOnce(Control)) -> io::Result<Ended> {
+pub fn run(
+    config: &Config,
+    console: Console,
+    events: Arc<Events>,
+    ready: impl FnOnce(Control),
+) -> io::Result<Ended> {
     let kernel_path = expand(&config.kernel);
     let kernel = std::fs::read(&kernel_path)
         .map_err(|e| io::Error::new(e.kind(), format!("kernel {}: {e}", kernel_path.display())))?;
-    // Three more windows: rng, vsock and net.
-    if config.disk.len() + 3 > layout::MAX_DEVICES {
+    // Six more windows: rng, vsock, net, gpu and two inputs.
+    if config.disk.len() + 6 > layout::MAX_DEVICES {
         return Err(io::Error::other("too many disks"));
     }
     let memory = guest_memory(config.memory_mib)?;
@@ -254,8 +272,30 @@ pub fn run(config: &Config, console: Console, ready: impl FnOnce(Control)) -> io
         line_of(index + 1),
     );
     window(&mut bus, vsock.clone());
-    let (net_slot, network) = network(config, &memory, &irq, line_of(index + 2))?;
+    let (net_slot, network) = network(config, &memory, &irq, line_of(index + 2), &events)?;
     window(&mut bus, net_slot);
+    let screen = Arc::new(Screen::new(config.display.width, config.display.height));
+    let gpu = Slot::new(
+        Gpu::new(screen.clone()),
+        memory.clone(),
+        irq.clone(),
+        line_of(index + 3),
+    );
+    window(&mut bus, gpu);
+    let keyboard = Slot::new(
+        Input::new(Kind::Keyboard),
+        memory.clone(),
+        irq.clone(),
+        line_of(index + 4),
+    );
+    let tablet = Slot::new(
+        Input::new(Kind::Tablet),
+        memory.clone(),
+        irq.clone(),
+        line_of(index + 5),
+    );
+    window(&mut bus, keyboard.clone());
+    window(&mut bus, tablet.clone());
 
     let (entry, arg, uart) =
         load_guest(config, &memory, &kernel, &lines, &console, &irq, &mut bus)?;
@@ -264,6 +304,9 @@ pub fn run(config: &Config, console: Console, ready: impl FnOnce(Control)) -> io
         vsock,
         network,
         console: console.clone(),
+        screen,
+        input: InputPorts { keyboard, tablet },
+        events,
         stop: {
             let vm = stopper;
             Arc::new(move || vm.stop())

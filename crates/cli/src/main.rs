@@ -4,10 +4,11 @@ use std::{
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
+    sync::Arc,
 };
 use thanatos_hv::{Host, Hypervisor};
 use thanatos_vmm::{
-    api::{self, AgentFrame, Body, Reply, Request},
+    api::{self, AgentFrame, Body, ImageFormat, InputEvent, Reply, Request, VncOptions},
     config::{Config, expand},
     console::Console,
     machine, server,
@@ -37,11 +38,22 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             });
         }
+        ["status", name] => show(name, Body::Status),
+        ["screenshot", name] => screenshot(name),
+        ["display", name, "headless"] => display(name, "headless", None),
+        ["display", name, "vnc"] => display(name, "vnc", None),
+        ["display", name, "vnc", bind] => display(name, "vnc", Some((*bind).into())),
+        ["display", name, "vnc", bind, password] => display_with_password(name, bind, password),
+        ["key", name, code] => key(name, code),
+        ["console", name] => console(name),
+        ["forward", "add", name, spec] => show(name, Body::ForwardAdd { spec: (*spec).into() }),
+        ["forward", "remove", name, spec] => show(name, Body::ForwardRemove { spec: (*spec).into() }),
+        ["events", name] => events(name),
         ["stop", name] => stop(name, true),
         ["stop", name, "--force"] => stop(name, false),
         ["file", "put", name, local, guest] => file_put(name, local, guest),
         ["file", "get", name, guest, local] => file_get(name, guest, local),
-        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local>".to_string()),
+        _ => Err("usage: thanatos doctor [--sign] | run <vm.toml> | image build [--arch A] [--profile P] | vm create <name> | exec <name> -- <argv...> | stop <name> [--force] | file put <name> <local> <guest> | file get <name> <guest> <local> | status <name> | screenshot <name> | display <name> headless|vnc [bind] [password] | key <name> <code[+code...]> | console <name> | forward add|remove <name> <spec> | events <name>".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -57,14 +69,20 @@ fn run(path: &str) -> Result<(), String> {
     let console = Console::default();
     console.add_output(std::io::stdout());
     let socket = server::socket_path(&config);
-    let ended = machine::run(&config, console, |control| {
+    let events = Arc::new(server::Events::default());
+    let ended = machine::run(&config, console, events.clone(), |control| {
         // A VM nothing can reach or stop should not keep running.
         let stop = control.stop.clone();
-        if let Err(error) = server::serve(&socket, control) {
+        if let Err(error) = server::serve(&socket, &config, control) {
             eprintln!("control API {}: {error}", socket.display());
             stop();
         }
     });
+    if let Ok(ended) = &ended {
+        events.emit(&api::Event::Shutdown {
+            status: format!("{ended:?}").to_lowercase(),
+        });
+    }
     let _ = std::fs::remove_file(&socket);
     ended.map_err(|e| e.to_string())?;
     Ok(())
@@ -145,6 +163,81 @@ fn exec(name: &str, argv: &[&str]) -> Result<ExitCode, String> {
             AgentFrame::Stdin | AgentFrame::Data | AgentFrame::Done => (),
         }
     }
+}
+
+fn show(name: &str, body: Body) -> Result<(), String> {
+    println!("{}", request(name, body)?);
+    Ok(())
+}
+
+/// Writes a PNG to stdout.
+fn screenshot(name: &str) -> Result<(), String> {
+    let format = ImageFormat::Png;
+    let result = request(name, Body::Screenshot { format })?;
+    let mut socket = attach(name, &result)?;
+    std::io::copy(&mut socket, &mut std::io::stdout())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn display(name: &str, mode: &str, bind: Option<String>) -> Result<(), String> {
+    let vnc = bind.map(|bind| VncOptions {
+        bind: Some(bind),
+        password: None,
+    });
+    let mode = mode.into();
+    show(name, Body::Display { mode, vnc })
+}
+
+fn display_with_password(name: &str, bind: &str, password: &str) -> Result<(), String> {
+    let vnc = Some(VncOptions {
+        bind: Some(bind.into()),
+        password: Some(password.into()),
+    });
+    let mode = "vnc".into();
+    show(name, Body::Display { mode, vnc })
+}
+
+/// Presses keys together and releases them in reverse: `125+28` is Super+Enter.
+fn key(name: &str, codes: &str) -> Result<(), String> {
+    let codes: Vec<u16> = codes
+        .split('+')
+        .map(|code| code.parse().map_err(|_| format!("bad keycode {code:?}")))
+        .collect::<Result<_, _>>()?;
+    let press = codes
+        .iter()
+        .map(|&code| InputEvent::Key { code, down: true });
+    let release = codes
+        .iter()
+        .rev()
+        .map(|&code| InputEvent::Key { code, down: false });
+    let events = press.chain(release).collect();
+    request(name, Body::Input { events }).map(|_| ())
+}
+
+fn console(name: &str) -> Result<(), String> {
+    let result = request(name, Body::Console)?;
+    let mut socket = attach(name, &result)?;
+    let mut to_guest = socket.try_clone().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut to_guest);
+    });
+    std::io::copy(&mut socket, &mut std::io::stdout())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Prints events until the VM ends.
+fn events(name: &str) -> Result<(), String> {
+    let mut socket = connect(name)?;
+    let line = serde_json::to_string(&Request {
+        id: 1,
+        body: Body::Events,
+    });
+    writeln!(socket, "{}", line.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::io::copy(&mut socket, &mut std::io::stdout())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn stop(name: &str, graceful: bool) -> Result<(), String> {

@@ -6,13 +6,22 @@ check:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
 
-# Boots the current image on this host and shows the serial console.
+# Boots the current desktop-profile image on this host: agent, network, screen and input.
 boot:
-    cargo test --release -p thanatos-cli --test boot -- --ignored --nocapture
+    cargo test --release -p thanatos-cli --test boot --test desktop -- --ignored --nocapture
 
-image arch=default_arch profile="minimal": _build
+image arch=default_arch profile="desktop": _build
     {{bin}} image build --arch {{arch}} --profile {{profile}}
 
 _build:
     cargo build --release -p thanatos-cli
     {{ if os() == "macos" { bin + " doctor --sign" } else { "true" } }}
+
+# Runs each device and parser fuzzer for a minute.
+fuzz:
+    #!/bin/sh
+    set -eu
+    cd fuzz
+    for target in $(cargo +nightly fuzz list); do
+        cargo +nightly fuzz run "$target" -- -max_total_time=60
+    done

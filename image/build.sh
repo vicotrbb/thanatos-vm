@@ -49,9 +49,14 @@ PACKAGES=$(cat /src/image/rootfs/packages.txt "/src/image/profiles/$PROFILE.txt"
 ROOT=/tmp/root
 rm -rf $ROOT
 mmdebstrap --mode=root --variant=minbase --architectures=$DEB --include="$PACKAGES" \
-    --aptopt='Acquire::Check-Valid-Until "false"' \
+    --aptopt='Acquire::Check-Valid-Until "false"' --aptopt='Acquire::Retries "10"' \
     trixie $ROOT "deb http://snapshot.debian.org/archive/debian/$SNAPSHOT trixie main"
 
+# snapshot.debian.org rate-limits; a pinned archive also outlives its Release file's validity.
+cat > $ROOT/etc/apt/apt.conf.d/90thanatos <<APT
+Acquire::Retries "10";
+Acquire::Check-Valid-Until "false";
+APT
 cat > $ROOT/etc/fstab <<FSTAB
 /dev/vda / ext4 defaults 0 1
 FSTAB
@@ -89,6 +94,28 @@ chroot $ROOT passwd -d root
 echo 'user ALL=(ALL) NOPASSWD:ALL' > $ROOT/etc/sudoers.d/user
 chroot $ROOT systemctl enable systemd-networkd systemd-resolved thanatos-grow thanatos-guest
 chroot $ROOT systemctl disable ssh 2>/dev/null || true
+if [ "$PROFILE" = desktop ]; then
+    # Autologin on tty1 gives a logind session, which is what lets sway have the DRM device.
+    mkdir -p $ROOT/etc/systemd/system/getty@tty1.service.d $ROOT/home/user/.config/sway
+    cat > $ROOT/etc/systemd/system/getty@tty1.service.d/autologin.conf <<UNIT
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin user --noclear %I linux
+UNIT
+    cat > $ROOT/home/user/.bash_profile <<SESSION
+if [ "\$(tty)" = /dev/tty1 ]; then
+    WLR_RENDERER=pixman WLR_NO_HARDWARE_CURSORS=1 exec sway
+fi
+SESSION
+    cat > $ROOT/home/user/.config/sway/config <<SWAY
+# A flat colour and no bar: the desktop check compares the screen to this.
+output * bg #204060 solid_color
+set \$mod Mod4
+bindsym \$mod+Return exec foot
+bindsym \$mod+Shift+q kill
+SWAY
+    chroot $ROOT chown -R user:user /home/user
+fi
 ln -sf /run/systemd/resolve/stub-resolv.conf $ROOT/etc/resolv.conf
 rm -f $ROOT/etc/machine-id $ROOT/var/lib/dbus/machine-id
 : > $ROOT/etc/machine-id

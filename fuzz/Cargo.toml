@@ -1,0 +1,45 @@
+[package]
+name = "thanatos-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+thanatos-vmm = { path = "../crates/vmm" }
+vm-memory = { version = "0.18", features = ["backend-mmap"] }
+serde_json = "1"
+
+# Not a member of the repository's workspace: it builds on nightly with sanitizers.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "blk"
+path = "fuzz_targets/blk.rs"
+[[bin]]
+name = "vsock"
+path = "fuzz_targets/vsock.rs"
+[[bin]]
+name = "net"
+path = "fuzz_targets/net.rs"
+[[bin]]
+name = "gpu"
+path = "fuzz_targets/gpu.rs"
+[[bin]]
+name = "input"
+path = "fuzz_targets/input.rs"
+[[bin]]
+name = "rng"
+path = "fuzz_targets/rng.rs"
+[[bin]]
+name = "rfb"
+path = "fuzz_targets/rfb.rs"
+[[bin]]
+name = "api"
+path = "fuzz_targets/api.rs"

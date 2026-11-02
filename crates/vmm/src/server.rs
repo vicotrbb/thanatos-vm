@@ -1,9 +1,13 @@
 //! The control API: JSON lines on a mode-0600 Unix socket, one thread per connection.
 use crate::{
-    api::{AGENT_PORT, AgentRequest, Body, Reply, Request, read_frame, write_frame},
+    api::{
+        AGENT_PORT, AgentRequest, Body, Event, ImageFormat, InputEvent, Reply, Request, VncOptions,
+        read_frame, write_frame,
+    },
     config::{Config, expand},
-    devices::vsock,
+    devices::{input::ABS_MAX, vsock},
     machine::Control,
+    rfb::Vnc,
 };
 use serde_json::{Value, json};
 use std::{
@@ -25,6 +29,43 @@ const MAX_LINE: usize = 1 << 20;
 enum Channel {
     Console,
     Stream(UnixStream),
+    Bytes(Vec<u8>),
+}
+
+/// How long a slow subscriber can hold up the line before it is dropped.
+const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const AGENT_POLL_BOOTING: Duration = Duration::from_millis(500);
+const AGENT_POLL_RUNNING: Duration = Duration::from_secs(5);
+
+/// A connection's write side: a reply or an event goes out whole.
+type Writer = Arc<Mutex<UnixStream>>;
+
+fn write_line(writer: &Writer, value: &impl serde::Serialize) -> io::Result<()> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    writer.lock().unwrap().write_all(&line)
+}
+
+/// The subscribers of the event stream.
+#[derive(Default)]
+pub struct Events(Mutex<Vec<Writer>>);
+
+impl Events {
+    pub fn emit(&self, event: &Event) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|writer| write_line(writer, event).is_ok());
+    }
+
+    fn subscribe(&self, writer: Writer) -> io::Result<()> {
+        writer
+            .lock()
+            .unwrap()
+            .set_write_timeout(Some(EVENT_WRITE_TIMEOUT))?;
+        self.0.lock().unwrap().push(writer);
+        Ok(())
+    }
 }
 
 struct Server {
@@ -33,6 +74,12 @@ struct Server {
     /// shortcut: a token nobody attaches stays until the VM ends, expire them if a client churns.
     tokens: Mutex<HashMap<String, Channel>>,
     stopping: Mutex<bool>,
+    agent_alive: Mutex<bool>,
+    agent_enabled: bool,
+    vcpus: u32,
+    memory_mib: u64,
+    vnc_bind: String,
+    display: Mutex<(String, Option<Vnc>)>,
 }
 
 pub fn socket_path(config: &Config) -> PathBuf {
@@ -72,14 +119,26 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
     bound
 }
 
-pub fn serve(path: &Path, control: Control) -> io::Result<()> {
+pub fn serve(path: &Path, config: &Config, control: Control) -> io::Result<()> {
     let listener = bind(path)?;
+    control.events.emit(&Event::Boot);
     let server = Arc::new(Server {
         control,
         started: Instant::now(),
         tokens: Mutex::default(),
         stopping: Mutex::new(false),
+        agent_alive: Mutex::new(false),
+        agent_enabled: config.agent.enabled,
+        vcpus: config.vcpus,
+        memory_mib: config.memory_mib,
+        vnc_bind: config.display.vnc_bind.clone(),
+        display: Mutex::new(("headless".into(), None)),
     });
+    server.set_display(&config.display.mode, None)?;
+    if config.agent.enabled {
+        let server = server.clone();
+        std::thread::spawn(move || server.watch_agent());
+    }
     std::thread::spawn(move || {
         for connection in listener.incoming().flatten() {
             let server = server.clone();
@@ -127,7 +186,77 @@ fn splice(from: UnixStream, to: UnixStream) -> std::thread::JoinHandle<()> {
 }
 
 impl Server {
+    /// Polls the agent, reporting only when its liveness changes.
+    fn watch_agent(&self) {
+        loop {
+            let alive = heartbeat(&self.control).is_ok();
+            let mut known = self.agent_alive.lock().unwrap();
+            if *known != alive {
+                *known = alive;
+                drop(known);
+                self.control.events.emit(&Event::Agent { alive });
+            } else {
+                drop(known);
+            }
+            std::thread::sleep(if alive {
+                AGENT_POLL_RUNNING
+            } else {
+                AGENT_POLL_BOOTING
+            });
+        }
+    }
+
+    fn set_display(&self, mode: &str, vnc: Option<VncOptions>) -> io::Result<()> {
+        let sink = match mode {
+            "headless" => None,
+            "vnc" => {
+                let options = vnc.unwrap_or(VncOptions {
+                    bind: None,
+                    password: None,
+                });
+                let bind = options.bind.unwrap_or_else(|| self.vnc_bind.clone());
+                let mut display = self.display.lock().unwrap();
+                // The old listener must let go first in case the address is the same.
+                display.1 = None;
+                drop(display);
+                Some(Vnc::start(
+                    &bind,
+                    options.password,
+                    self.control.screen.clone(),
+                    self.control.input.clone(),
+                )?)
+            }
+            // shortcut: the window sink is not built, add winit and softbuffer behind the `window` feature when a local viewer is wanted.
+            "window" => return Err(io::Error::other("this build has no window sink: use vnc")),
+            other => return Err(io::Error::other(format!("unknown display mode {other:?}"))),
+        };
+        *self.display.lock().unwrap() = (mode.into(), sink);
+        self.control
+            .events
+            .emit(&Event::DisplayMode { mode: mode.into() });
+        Ok(())
+    }
+
+    fn inject(&self, events: &[InputEvent]) {
+        let input = &self.control.input;
+        let (width, height) = self.control.screen.with(|f| (f.width, f.height));
+        let scale = |value: u32, size: u32| {
+            value.min(size.saturating_sub(1)) * ABS_MAX / size.saturating_sub(1).max(1)
+        };
+        for event in events {
+            match *event {
+                InputEvent::Key { code, down } => input.key(code, down),
+                InputEvent::PointerMove { x, y } => {
+                    input.pointer(scale(x, width), scale(y, height))
+                }
+                InputEvent::Button { button, down } => input.button(button, down),
+                InputEvent::Scroll { clicks } => input.scroll(clicks),
+            }
+        }
+    }
+
     fn connection(&self, mut connection: UnixStream) -> io::Result<()> {
+        let writer: Writer = Arc::new(Mutex::new(connection.try_clone()?));
         let mut first = true;
         while let Some(line) = read_line(&mut connection)? {
             let value: Result<Value, _> = serde_json::from_str(&line);
@@ -140,6 +269,10 @@ impl Server {
             first = false;
             let reply = match serde_json::from_str::<Request>(&line) {
                 Ok(request) => {
+                    let subscribing = request.body == Body::Events;
+                    if subscribing {
+                        self.control.events.subscribe(writer.clone())?;
+                    }
                     let (result, error) = match self.handle(request.body) {
                         Ok(result) => (Some(result), None),
                         Err(error) => (None, Some(error.to_string())),
@@ -156,9 +289,7 @@ impl Server {
                     error: Some(format!("bad request: {error}")),
                 },
             };
-            let mut line = serde_json::to_vec(&reply)?;
-            line.push(b'\n');
-            connection.write_all(&line)?;
+            write_line(&writer, &reply)?;
         }
         Ok(())
     }
@@ -170,6 +301,7 @@ impl Server {
                 let _ = writeln!(connection, "{}", json!({ "error": "unknown token" }));
                 Ok(())
             }
+            Some(Channel::Bytes(bytes)) => connection.write_all(&bytes),
             Some(Channel::Stream(stream)) => {
                 let (back_from, back_to) = (stream.try_clone()?, connection.try_clone()?);
                 let there = splice(connection, stream);
@@ -205,12 +337,66 @@ impl Server {
         Ok(stream)
     }
 
+    fn forward(
+        &self,
+        change: impl FnOnce(&thanatos_net::Net) -> Result<(), String>,
+    ) -> io::Result<Value> {
+        let net = self.control.network.as_ref().ok_or_else(|| {
+            io::Error::other("forwards do not apply to a tap: the operator's network does")
+        })?;
+        change(net).map_err(io::Error::other)?;
+        Ok(json!({}))
+    }
+
     fn handle(&self, body: Body) -> io::Result<Value> {
         match body {
-            Body::Status => Ok(json!({
-                "state": if *self.stopping.lock().unwrap() { "stopping" } else { "running" },
-                "uptime_seconds": self.started.elapsed().as_secs(),
-            })),
+            Body::Status => {
+                let state = if *self.stopping.lock().unwrap() {
+                    "stopping"
+                } else if self.agent_enabled && !*self.agent_alive.lock().unwrap() {
+                    "booting"
+                } else {
+                    "running"
+                };
+                Ok(json!({
+                    "state": state,
+                    "uptime_seconds": self.started.elapsed().as_secs(),
+                    "vcpus": self.vcpus,
+                    "memory_mib": self.memory_mib,
+                    "devices": ["blk", "rng", "vsock", "net", "gpu", "input"],
+                    "display_mode": self.display.lock().unwrap().0,
+                    "agent_alive": *self.agent_alive.lock().unwrap(),
+                }))
+            }
+            Body::Screenshot { format } => {
+                let (width, height, bytes) = match format {
+                    ImageFormat::Png => {
+                        let png = self.control.screen.png()?;
+                        let (width, height) = self.control.screen.with(|f| (f.width, f.height));
+                        (width, height, png)
+                    }
+                    ImageFormat::Raw => self
+                        .control
+                        .screen
+                        .with(|f| (f.width, f.height, f.pixels.clone())),
+                };
+                let mut reply = self.issue(Channel::Bytes(bytes))?;
+                reply["width"] = width.into();
+                reply["height"] = height.into();
+                Ok(reply)
+            }
+            Body::Input { events } => {
+                self.inject(&events);
+                Ok(json!({}))
+            }
+            Body::Display { mode, vnc } => {
+                self.set_display(&mode, vnc)?;
+                let bound = self.display.lock().unwrap().1.as_ref().map(Vnc::address);
+                Ok(json!({ "mode": mode, "address": bound.map(|a| a.to_string()) }))
+            }
+            Body::ForwardAdd { spec } => self.forward(|net| net.add_forward(&spec)),
+            Body::ForwardRemove { spec } => self.forward(|net| net.remove_forward(&spec)),
+            Body::Events => Ok(json!({})),
             Body::Stop { graceful, timeout } => {
                 *self.stopping.lock().unwrap() = true;
                 let stop = self.control.stop.clone();

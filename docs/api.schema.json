@@ -1,0 +1,435 @@
+{
+  "$defs": {
+    "attach": {
+      "description": "The first line of a connection opening a binary channel; raw bytes follow.",
+      "properties": {
+        "attach": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attach"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "oneOf": [
+        {
+          "properties": {
+            "event": {
+              "const": "boot"
+            }
+          },
+          "required": [
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "shutdown"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "destination": {
+              "type": "string"
+            },
+            "event": {
+              "const": "network_denied"
+            }
+          },
+          "required": [
+            "event",
+            "destination"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "display_mode"
+            },
+            "mode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "alive": {
+              "type": "boolean"
+            },
+            "event": {
+              "const": "agent"
+            }
+          },
+          "required": [
+            "event",
+            "alive"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "input_event": {
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "down": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "key"
+            }
+          },
+          "required": [
+            "kind",
+            "code",
+            "down"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "pointer_move"
+            },
+            "x": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "y": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "x",
+            "y"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "button": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "down": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "button"
+            }
+          },
+          "required": [
+            "kind",
+            "button",
+            "down"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "clicks": {
+              "type": "integer"
+            },
+            "kind": {
+              "const": "scroll"
+            }
+          },
+          "required": [
+            "kind",
+            "clicks"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "reply": {
+      "description": "One line per request, with its id: a result or an error.",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "id": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "result": {}
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "request": {
+      "description": "One line from a client. Every request also carries an integer id.",
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "const": "status"
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "graceful": {
+              "type": "boolean"
+            },
+            "request": {
+              "const": "stop"
+            },
+            "timeout": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "const": "console"
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "port": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request": {
+              "const": "vsock"
+            }
+          },
+          "required": [
+            "request",
+            "port"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "request": {
+              "const": "exec"
+            },
+            "stdin": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "request",
+            "argv"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "request": {
+              "const": "file_put"
+            }
+          },
+          "required": [
+            "request",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "request": {
+              "const": "file_get"
+            }
+          },
+          "required": [
+            "request",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "format": {
+              "enum": [
+                "png",
+                "raw"
+              ]
+            },
+            "request": {
+              "const": "screenshot"
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "events": {
+              "items": {
+                "$ref": "#/$defs/input_event"
+              },
+              "type": "array"
+            },
+            "request": {
+              "const": "input"
+            }
+          },
+          "required": [
+            "request",
+            "events"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "enum": [
+                "headless",
+                "vnc",
+                "window"
+              ]
+            },
+            "request": {
+              "const": "display"
+            },
+            "vnc": {
+              "properties": {
+                "bind": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "password": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "request",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "const": "forward_add"
+            },
+            "spec": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "const": "forward_remove"
+            },
+            "spec": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "const": "events"
+            }
+          },
+          "required": [
+            "request"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Thanatos control API"
+}

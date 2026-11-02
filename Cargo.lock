@@ -349,6 +349,7 @@ dependencies = [
 name = "thanatos-cli"
 version = "1.0.0"
 dependencies = [
+ "png",
  "serde_json",
  "thanatos-hv",
  "thanatos-vmm",
