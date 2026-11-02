@@ -1,0 +1,13 @@
+[package]
+name = "thanatos-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Thanatos user-mode network: smoltcp, NAT to host sockets, policy, forwards"
+
+[lints]
+workspace = true
+
+[dependencies]
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "auto-icmp-echo-reply"] }

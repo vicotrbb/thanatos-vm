@@ -1,0 +1,19 @@
+[package]
+name = "thanatos-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The thanatos binary: run a Linux VM on KVM or Hypervisor.framework and drive it"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "thanatos"
+path = "src/main.rs"
+
+[dependencies]
+thanatos-hv = { path = "../hv" }
+thanatos-vmm = { path = "../vmm" }
+serde_json = "1"

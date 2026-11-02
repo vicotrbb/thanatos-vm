@@ -1,0 +1,17 @@
+[package]
+name = "thanatos-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The optional Thanatos guest agent: exec, file copy and shutdown over vsock"
+
+[lints]
+workspace = true
+
+[dependencies]
+thanatos-vmm = { path = "../vmm" }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["socket"] }

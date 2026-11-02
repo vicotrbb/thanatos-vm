@@ -1,0 +1,22 @@
+[package]
+name = "thanatos-hv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hypervisor traits and the KVM and Hypervisor.framework backends of Thanatos"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[dependencies]
+vm-memory = { version = "0.18", features = ["backend-mmap"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.25"
+kvm-bindings = "0.14"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+applevisor = { version = "1.0", default-features = false, features = ["macos-15-0"] }
+applevisor-sys = { version = "1.0", default-features = false, features = ["macos-15-0"] }
