@@ -55,6 +55,8 @@ impl Hypervisor for Host {
             vcpus,
             threads: Arc::default(),
             stopped: AtomicBool::new(false),
+            // A unit struct on x86_64 only.
+            #[allow(clippy::default_constructed_unit_structs)]
             arch: Mutex::new(arch::VmState::default()),
         })
     }
