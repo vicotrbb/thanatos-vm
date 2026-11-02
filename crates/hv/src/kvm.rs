@@ -47,7 +47,7 @@ impl Hypervisor for Host {
             // VM's whole life, and it covers exactly the region's length.
             unsafe { fd.set_user_memory_region(mapping)? };
         }
-        arch::setup_vm(&fd)?;
+        let arch = arch::setup_vm(&fd)?;
         install_kick_handler()?;
         Ok(KvmVm {
             kvm,
@@ -55,9 +55,7 @@ impl Hypervisor for Host {
             vcpus,
             threads: Arc::default(),
             stopped: AtomicBool::new(false),
-            // A unit struct on x86_64 only.
-            #[allow(clippy::default_constructed_unit_structs)]
-            arch: Mutex::new(arch::VmState::default()),
+            arch,
         })
     }
 }
@@ -83,7 +81,7 @@ pub struct KvmVm {
     threads: Arc<Mutex<Vec<libc::pthread_t>>>,
     stopped: AtomicBool,
     #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
-    arch: Mutex<arch::VmState>,
+    arch: arch::VmState,
 }
 
 impl Vm for KvmVm {
@@ -208,19 +206,18 @@ mod arch {
     use super::*;
     use kvm_bindings::{KVM_MAX_CPUID_ENTRIES, kvm_pit_config, kvm_regs};
 
-    #[derive(Default)]
     pub struct VmState;
 
     pub fn irq_number(line: u32) -> u32 {
         line
     }
 
-    pub fn setup_vm(fd: &VmFd) -> io::Result<()> {
+    pub fn setup_vm(fd: &VmFd) -> io::Result<VmState> {
         // Intel needs a three-page TSS region below 4 GiB, outside RAM and the MMIO windows.
         fd.set_tss_address(0xfffb_d000)?;
         fd.create_irq_chip()?;
         fd.create_pit2(kvm_pit_config::default())?;
-        Ok(())
+        Ok(VmState)
     }
 
     pub fn setup_vcpu(vm: &KvmVm, fd: &VcpuFd, id: u32) -> io::Result<()> {
@@ -283,20 +280,79 @@ mod arch {
 #[cfg(target_arch = "aarch64")]
 mod arch {
     use super::*;
+    use crate::{GIC_DISTRIBUTOR, GIC_REDISTRIBUTOR};
+    use kvm_bindings::{
+        KVM_ARM_IRQ_TYPE_SHIFT, KVM_ARM_IRQ_TYPE_SPI, KVM_ARM_VCPU_POWER_OFF,
+        KVM_ARM_VCPU_PSCI_0_2, KVM_DEV_ARM_VGIC_CTRL_INIT, KVM_DEV_ARM_VGIC_GRP_ADDR,
+        KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_REG_ARM_CORE, KVM_REG_ARM64, KVM_REG_SIZE_U64,
+        KVM_VGIC_V3_ADDR_TYPE_DIST, KVM_VGIC_V3_ADDR_TYPE_REDIST, kvm_create_device,
+        kvm_device_attr, kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3, kvm_vcpu_init,
+    };
+    use kvm_ioctls::DeviceFd;
 
-    #[derive(Default)]
-    pub struct VmState;
+    /// Register ids address `struct kvm_regs` by offset in 32-bit words: x0 first, pc after
+    /// x0..x30 and sp.
+    const REG_X0: u64 = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE as u64;
+    const REG_PC: u64 = REG_X0 + 32 * 2;
 
-    pub fn irq_number(_: u32) -> u32 {
-        unimplemented!("step 4")
+    pub struct VmState {
+        gic: DeviceFd,
     }
-    pub fn setup_vm(_: &VmFd) -> io::Result<()> {
-        Err(io::Error::other("step 4"))
+
+    pub fn irq_number(line: u32) -> u32 {
+        (KVM_ARM_IRQ_TYPE_SPI << KVM_ARM_IRQ_TYPE_SHIFT) | (32 + line)
     }
-    pub fn setup_vcpu(_: &KvmVm, _: &VcpuFd, _: u32) -> io::Result<()> {
-        Err(io::Error::other("step 4"))
+
+    fn gic_attr(gic: &DeviceFd, group: u32, attr: u64, addr: u64) -> io::Result<()> {
+        gic.set_device_attr(&kvm_device_attr {
+            group,
+            attr,
+            addr,
+            flags: 0,
+        })?;
+        Ok(())
     }
-    pub fn set_boot_state(_: &VcpuFd, _: u64, _: u64) -> io::Result<()> {
-        Err(io::Error::other("step 4"))
+
+    pub fn setup_vm(fd: &VmFd) -> io::Result<VmState> {
+        let gic = fd.create_device(&mut kvm_create_device {
+            type_: kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3,
+            fd: 0,
+            flags: 0,
+        })?;
+        for (kind, address) in [
+            (KVM_VGIC_V3_ADDR_TYPE_DIST, GIC_DISTRIBUTOR),
+            (KVM_VGIC_V3_ADDR_TYPE_REDIST, GIC_REDISTRIBUTOR),
+        ] {
+            let address_of = &address as *const u64 as u64;
+            gic_attr(&gic, KVM_DEV_ARM_VGIC_GRP_ADDR, kind.into(), address_of)?;
+        }
+        Ok(VmState { gic })
+    }
+
+    pub fn setup_vcpu(vm: &KvmVm, fd: &VcpuFd, id: u32) -> io::Result<()> {
+        let mut init = kvm_vcpu_init::default();
+        vm.fd.get_preferred_target(&mut init)?;
+        init.features[0] |= 1 << KVM_ARM_VCPU_PSCI_0_2;
+        if id > 0 {
+            // Secondaries wait for the guest's PSCI CPU_ON.
+            init.features[0] |= 1 << KVM_ARM_VCPU_POWER_OFF;
+        }
+        fd.vcpu_init(&init)?;
+        // The GIC can only initialise once every vCPU exists, and vCPUs are created in order.
+        if id + 1 == vm.vcpus {
+            gic_attr(
+                &vm.arch.gic,
+                KVM_DEV_ARM_VGIC_GRP_CTRL,
+                KVM_DEV_ARM_VGIC_CTRL_INIT.into(),
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn set_boot_state(fd: &VcpuFd, entry: u64, arg: u64) -> io::Result<()> {
+        fd.set_one_reg(REG_PC, &entry.to_le_bytes())?;
+        fd.set_one_reg(REG_X0, &arg.to_le_bytes())?;
+        Ok(())
     }
 }

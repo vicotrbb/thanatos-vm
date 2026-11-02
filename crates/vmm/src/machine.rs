@@ -145,8 +145,11 @@ pub fn run(config: &Config, console: Console) -> io::Result<Ended> {
         load_guest(config, &memory, &kernel, &lines, &console, &irq, &mut bus)?;
     let bus = &bus;
     let ended = Mutex::new(None);
+    // Held until all vCPUs exist: KVM's GIC cannot initialise once one has entered the guest.
+    let gate = &Mutex::new(());
     std::thread::scope(|scope| -> io::Result<()> {
         let (created, wait) = mpsc::channel();
+        let opened = gate.lock().unwrap();
         for id in 0..config.vcpus {
             let (created, ended, uart, irq) = (created.clone(), &ended, &uart, irq.clone());
             scope.spawn(move || {
@@ -155,6 +158,7 @@ pub fn run(config: &Config, console: Console) -> io::Result<Ended> {
                         vcpu.set_boot_state(entry, arg)?;
                     }
                     let _ = created.send(Ok(()));
+                    drop(gate.lock());
                     vcpu_loop(&mut vcpu, bus, uart, &irq)
                 });
                 let reason = match result {
@@ -176,6 +180,7 @@ pub fn run(config: &Config, console: Console) -> io::Result<Ended> {
                 break;
             }
         }
+        drop(opened);
         Ok(())
     })?;
     let reason = ended.lock().unwrap().take();
