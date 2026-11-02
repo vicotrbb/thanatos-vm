@@ -370,6 +370,18 @@ Targets on a developer laptop, 2 vCPUs, 2 GiB:
 
 The table is advisory, measured on the minimal image profile (the desktop profile boots a full session and is not expected to meet the boot target). The release gate in section 8 is that the numbers are measured and recorded, not that they are met; the user decides whether a miss blocks a release. The known soft spot is the user-mode network, which copies every byte twice.
 
+### 7.1 Measured, 2026-11-02
+
+Apple M5 Pro, macOS 26, HVF, 2 vCPUs, 2 GiB. KVM was not measured: this machine reaches it only through a nested VM, and CI runners would not be representative.
+
+| Measure | Target | Result | How |
+| --- | --- | --- | --- |
+| Run to login prompt | < 2 s | **Missed.** 4.5 s (systemd's own report, minimal profile, 4 GiB disk); 15 s on first boot of a `vm create` desktop VM, whose 16 GiB resize is most of that | serial, `systemd-analyze` line |
+| Disk sequential read, 1 MiB | > 70 % of host | **Missed.** 2.8 GB/s against 10.8 GB/s host, 26 %, both from host cache | `dd` with `iflag=direct` in guest, `dd` on host |
+| User-mode net, TCP to host | > 300 MB/s | Met. 768 MB/s | `dd` to `/dev/tcp/10.0.2.2` into `nc`, not `iperf3` |
+| VNC on loopback at 1280x800 | 30 fps | Met for the server: 902 full-screen raw updates/s. 56 updates/s on a scrolling terminal, limited by the guest | a small RFB client; no synthetic guest flush loop |
+| Idle host CPU | < 2 % | Met. 0.3 % | `top` |
+
 ## 8. Testing and qualification
 
 - **Unit:** every device against a fake guest memory and a scripted virtqueue; the boot loaders against golden zero pages and device trees; the network stack against recorded packet exchanges; the API types against their JSON schema.
