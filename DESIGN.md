@@ -351,7 +351,7 @@ A VM's root disk is a copy of the base image, made at `thanatos vm create` with 
 - **Attack surface is the device model.** The guest controls every byte in every virtqueue. All device code is safe Rust over bounds-checked `vm-memory` accessors, and each device has a fuzz target in `fuzz/` driven by `cargo-fuzz` with a fake guest memory, run in CI.
 - **`unsafe` is confined** to `thanatos-hv`: hypervisor calls and the memory mapping. Every `unsafe` block has a comment naming the invariant it relies on.
 - **Host privileges:** none beyond opening the hypervisor device. No capabilities, no setuid, no helpers. The tap backend is the only exception, and it is opt-in.
-- **Process hardening (version 1.1):** a seccomp filter on Linux after the VM is set up, following Firecracker's allow list.
+- **Process hardening:** after the disks open, Landlock and a seccomp deny list on Linux, Seatbelt on macOS. See SECURITY.md for the limits.
 - **Screen and input integrity:** a screenshot is the VMM's own copy of the scanout, and the virtio-input queues are written only by the VMM. Thanatos guarantees the guest cannot alter the one or write into the other. It does not, and cannot, stop guest software from synthesizing input inside the guest; attribution between a person and a program is built above the API (4.11).
 - **Network:** policy is enforced in the VMM before a host socket is opened, so it cannot be bypassed from inside the guest.
 - **API socket** is mode 0600 in a directory the user owns. There is no network listener except VNC, which is off by default and binds loopback by default.
@@ -421,7 +421,7 @@ Each step ends with something that runs and a test that proves it. Nothing later
 8. **Control API and CLI complete.** Every request in 4.9; JSON schema; library documentation.
 9. **Qualification.** Boot matrix in CI, fuzzers, performance table, `cargo deny`. Tag 1.0.
 10. **Windows.** The `whp` backend and the x86_64 loader's WHP paths. Tag 1.1.
-11. **Later, independent:** seccomp, snapshot and restore, ZRLE, native window polish, Windows arm64, a tap-less bridge on macOS through `vmnet` for those who want the guest on the LAN.
+11. **Later, independent:** snapshot and restore, ZRLE, native window polish, Windows arm64, a tap-less bridge on macOS through `vmnet` for those who want the guest on the LAN.
 
 ## 11. Constraints
 

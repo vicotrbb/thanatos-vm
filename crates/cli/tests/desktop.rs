@@ -55,8 +55,12 @@ fn vnc_shows_the_screen_and_passes_keys(socket: &str) {
     vnc.write_all(&version).unwrap();
     let mut security = [0; 2];
     vnc.read_exact(&mut security).unwrap();
-    assert_eq!(security, [1, 1]);
-    vnc.write_all(&[1]).unwrap();
+    assert_eq!(security[1], 2, "loopback VNC must ask for a password");
+    vnc.write_all(&[2]).unwrap();
+    let mut challenge = [0; 16];
+    vnc.read_exact(&mut challenge).unwrap();
+    let response = thanatos_vmm::rfb::vnc_response(reply["password"].as_str().unwrap(), &challenge);
+    vnc.write_all(&response).unwrap();
     let mut result = [0; 4];
     vnc.read_exact(&mut result).unwrap();
     assert_eq!(result, [0; 4]);

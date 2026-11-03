@@ -23,6 +23,9 @@ if [ ! -f "/out/$IMAGE" ]; then
     echo "$KERNEL_SHA256  /tmp/linux.tar.xz" | sha256sum -c -
     tar -xf /tmp/linux.tar.xz -C /tmp
     cd "/tmp/linux-$KERNEL_VERSION"
+    # Upstream ded2d726, missing from 6.12: an ENOSPC mid-page on a block size below the page size
+    # commits blocks past the disk size, which e2fsck -p refuses after a crash.
+    patch -p1 < /src/image/kernel/ext4-partial-folio.patch
     make -s ARCH=$KARCH $DEFCONFIG
     cat /src/image/kernel/common.config "/src/image/kernel/$ARCH.config" >> .config
     make -s ARCH=$KARCH olddefconfig
@@ -38,7 +41,14 @@ if [ ! -f "/out/$IMAGE" ]; then
 fi
 
 # The agent: pinned toolchain from the repo, static musl so it runs on any guest userland.
-curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+case "$ARCH" in
+    aarch64) RUSTUP_SHA256=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c ;;
+    x86_64) RUSTUP_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c ;;
+esac
+curl -fsSL "https://static.rust-lang.org/rustup/archive/1.28.2/$ARCH-unknown-linux-gnu/rustup-init" -o /tmp/rustup-init
+echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -
+chmod +x /tmp/rustup-init
+/tmp/rustup-init -y --profile minimal --default-toolchain none
 . "$HOME/.cargo/env"
 cd /src
 rustup target add "$ARCH-unknown-linux-musl"

@@ -8,6 +8,9 @@ mod hvf;
 #[allow(unsafe_code)]
 mod kvm;
 
+#[allow(unsafe_code)]
+pub mod sandbox;
+
 #[cfg(target_os = "macos")]
 pub use hvf::Host;
 #[cfg(target_os = "linux")]

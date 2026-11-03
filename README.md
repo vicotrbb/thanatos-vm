@@ -59,11 +59,11 @@ thanatos key dev 125+28        # Linux keycodes: Super+Enter opens a terminal in
 ## VNC
 
 ```sh
-thanatos display dev vnc       # then point any VNC client at 127.0.0.1:5901
+thanatos display dev vnc       # prints the address and a new random password
 thanatos display dev headless
 ```
 
-An address other machines can reach needs a password: `thanatos display dev vnc 0.0.0.0:5901 <password>`. VNC authentication is weak by nature, so prefer an SSH tunnel.
+Loopback VNC gets a random password because other users on the machine can reach the port. `--display vnc` prints it to stderr. An address other machines can reach needs your own: `thanatos display dev vnc 0.0.0.0:5901 <password>`. VNC authentication is weak by nature, so prefer an SSH tunnel.
 
 ## Window
 
@@ -89,6 +89,12 @@ forward = ["127.0.0.1:2222->22"]
 ```
 
 The guest cannot reach this machine's own services, through 10.0.2.2 or 127.0.0.1, unless a rule allows it: `allow = ["10.0.2.2/32:8000/tcp"]`.
+
+## Sandbox
+
+Once its disks are open, the VMM confines itself: it cannot start programs or read your files, including through a guest escape. `thanatos run vm.toml --no-sandbox` or `[sandbox] enabled = false` turns this off. Read [SECURITY.md](SECURITY.md) for what this does and does not cover.
+
+A disk can have one writer or many readers. A second VM asking for a disk in use fails to start.
 
 ## API
 

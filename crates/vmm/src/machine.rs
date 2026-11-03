@@ -98,11 +98,25 @@ fn open_disk(disk: &crate::config::Disk) -> io::Result<File> {
             .set_len(mib << 20)
             .map_err(named)?;
     }
-    File::options()
+    let file = File::options()
         .read(true)
         .write(!disk.read_only)
         .open(&path)
-        .map_err(named)
+        .map_err(named)?;
+    // Two writers, or a reader beside a writer, would corrupt the filesystem or read it torn.
+    let locked = if disk.read_only {
+        file.try_lock_shared()
+    } else {
+        file.try_lock()
+    };
+    locked.map_err(|e| match e {
+        std::fs::TryLockError::WouldBlock => named(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "in use by another VM",
+        )),
+        std::fs::TryLockError::Error(e) => named(e),
+    })?;
+    Ok(file)
 }
 
 /// shortcut: the tap backend exists only on Linux, as DESIGN 4.8 specifies.
@@ -214,6 +228,24 @@ impl Bus {
     }
 }
 
+/// Disks and the kernel are already open; only these paths are still needed by name.
+fn confine(config: &Config) -> io::Result<()> {
+    let socket = crate::server::socket_path(config);
+    let parent = socket.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    thanatos_hv::sandbox::enter(&thanatos_hv::sandbox::Paths {
+        directories: vec![parent.to_path_buf()],
+        devices: ["/dev/kvm", "/dev/net/tun", "/dev/urandom"]
+            .map(Into::into)
+            .to_vec(),
+        // AppKit finds the application through its own executable.
+        read: ["/etc/resolv.conf".into()]
+            .into_iter()
+            .chain(std::env::current_exe())
+            .collect(),
+    })
+}
+
 pub fn run(
     config: &Config,
     console: Console,
@@ -226,6 +258,15 @@ pub fn run(
     // Six more windows: rng, vsock, net, gpu and two inputs.
     if config.disk.len() + 6 > layout::MAX_DEVICES {
         return Err(io::Error::other("too many disks"));
+    }
+    let disks = config
+        .disk
+        .iter()
+        .map(open_disk)
+        .collect::<io::Result<Vec<_>>>()?;
+    // Before any thread starts, because threads inherit the confinement on Linux.
+    if config.sandbox.enabled {
+        confine(config)?;
     }
     let memory = guest_memory(config.memory_mib)?;
     let vm = Arc::new(Host::create_vm(&memory, config.vcpus)?);
@@ -240,8 +281,8 @@ pub fn run(
 
     let mut bus = Bus::default();
     let mut lines = Vec::new();
-    for (index, disk) in config.disk.iter().enumerate() {
-        let blk = Blk::new(open_disk(disk)?, disk.read_only, &format!("vd{index}"))?;
+    for (index, (file, disk)) in disks.into_iter().zip(&config.disk).enumerate() {
+        let blk = Blk::new(file, disk.read_only, &format!("vd{index}"))?;
         let base = layout::MMIO_BASE + index as u64 * layout::MMIO_WINDOW;
         let line = layout::FIRST_IRQ + index as u32;
         bus.add(
@@ -456,5 +497,34 @@ fn port_io(port: u16, data: &mut [u8], write: bool, (serial, cmos): &PortUart, i
         irq(layout::SERIAL_IRQ, uart.line());
     } else if !write {
         data.fill(0xff); // nothing there, as an empty ISA bus reads
+    }
+}
+
+#[cfg(test)]
+mod disk_lock_tests {
+    use super::*;
+    use crate::config::Disk;
+
+    #[test]
+    fn a_disk_has_one_writer_or_many_readers() {
+        let path = std::env::temp_dir().join(format!("thanatos-lock-{}", std::process::id()));
+        std::fs::write(&path, [0; 512]).unwrap();
+        let disk = |read_only| Disk {
+            path: path.clone(),
+            read_only,
+            create_mib: None,
+        };
+        let writer = open_disk(&disk(false)).unwrap();
+        let busy = open_disk(&disk(false)).unwrap_err();
+        assert_eq!(busy.kind(), io::ErrorKind::ResourceBusy);
+        assert!(busy.to_string().contains("in use"));
+        assert!(open_disk(&disk(true)).is_err());
+        drop(writer);
+        let (_one, _two) = (
+            open_disk(&disk(true)).unwrap(),
+            open_disk(&disk(true)).unwrap(),
+        );
+        assert!(open_disk(&disk(false)).is_err());
+        std::fs::remove_file(&path).unwrap();
     }
 }

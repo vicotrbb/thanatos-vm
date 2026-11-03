@@ -25,6 +25,20 @@ pub struct Config {
     pub api: Api,
     #[serde(default)]
     pub agent: Agent,
+    #[serde(default)]
+    pub sandbox: Sandbox,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Sandbox {
+    pub enabled: bool,
+}
+
+impl Default for Sandbox {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -86,6 +86,7 @@ struct Server {
 /// The mode, and the running sink: dropping a sink stops it.
 #[derive(Default)]
 struct Display {
+    vnc_password: Option<String>,
     mode: String,
     vnc: Option<Vnc>,
     window: Option<crate::window::Window>,
@@ -154,6 +155,9 @@ pub fn serve(path: &Path, config: &Config, control: Control) -> io::Result<()> {
         }
         eprintln!("window unavailable, continuing headless: {error}");
     }
+    if let Some(password) = &server.display.lock().unwrap().vnc_password {
+        eprintln!("VNC password: {password}");
+    }
     if config.agent.enabled {
         let server = server.clone();
         std::thread::spawn(move || server.watch_agent());
@@ -167,6 +171,22 @@ pub fn serve(path: &Path, config: &Config, control: Control) -> io::Result<()> {
         }
     });
     Ok(())
+}
+
+fn is_loopback(bind: &str) -> bool {
+    bind.parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+}
+
+/// VNC keys use eight characters at most.
+fn random_password() -> io::Result<String> {
+    const LETTERS: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut bytes = [0; 8];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes
+        .iter()
+        .map(|byte| LETTERS[*byte as usize % LETTERS.len()] as char)
+        .collect())
 }
 
 /// Reads to a newline, a byte at a time so nothing past it is consumed: after an attach line the
@@ -240,9 +260,16 @@ impl Server {
                 let bind = options.bind.unwrap_or_else(|| self.vnc_bind.clone());
                 // The old listener must let go first in case the address is the same.
                 self.display.lock().unwrap().vnc = None;
+                // Other local users can reach a loopback port, so it gets a password too.
+                let password = match options.password {
+                    Some(password) => Some(password),
+                    None if is_loopback(&bind) => Some(random_password()?),
+                    None => None,
+                };
+                next.vnc_password = password.clone();
                 next.vnc = Some(Vnc::start(
                     &bind,
-                    options.password,
+                    password,
                     self.control.screen.clone(),
                     self.control.input.clone(),
                 )?);
@@ -431,7 +458,12 @@ impl Server {
             Body::Display { mode, vnc } => {
                 self.set_display(&mode, vnc)?;
                 let bound = self.display.lock().unwrap().vnc.as_ref().map(Vnc::address);
-                Ok(json!({ "mode": mode, "address": bound.map(|a| a.to_string()) }))
+                let password = self.display.lock().unwrap().vnc_password.clone();
+                Ok(json!({
+                    "mode": mode,
+                    "address": bound.map(|a| a.to_string()),
+                    "password": password,
+                }))
             }
             Body::ForwardAdd { spec } => self.forward(|net| net.add_forward(&spec)),
             Body::ForwardRemove { spec } => self.forward(|net| net.remove_forward(&spec)),
